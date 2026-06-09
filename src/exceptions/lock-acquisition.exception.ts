@@ -14,14 +14,15 @@ import { HttpException, HttpStatus } from '@nestjs/common';
  * }
  */
 export class LockAcquisitionException extends HttpException {
-  constructor(resource: string, retryCount: number) {
+  constructor(resource: string, retryCount: number, estimatedWaitMs: number) {
     super(
       {
         statusCode: HttpStatus.CONFLICT,
         error: 'Lock Acquisition Failed',
         message:
-          `Failed to acquire lock for resource "${resource}" after ${retryCount} attempts. ` +
-          `Another process may hold this lock. Retry your request or contact support.`,
+          `Failed to acquire lock for resource "${resource}" after ${retryCount} retries ` +
+          `(~${estimatedWaitMs}ms wait). ` +
+          `Another process holds this lock. Wait and retry your request, or increase retryCount/retryDelay in LockModule config.`,
       },
       HttpStatus.CONFLICT,
     );

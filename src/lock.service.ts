@@ -24,6 +24,8 @@ export class LockService implements OnModuleDestroy {
   private readonly keyPrefix: string;
   private readonly defaultDuration: number;
   private readonly retryCount: number;
+  private readonly retryDelay: number;
+  private readonly retryJitter: number;
 
   constructor(
     @Inject(LOCK_MODULE_OPTIONS)
@@ -32,12 +34,14 @@ export class LockService implements OnModuleDestroy {
     this.keyPrefix = options.keyPrefix ?? 'lock';
     this.defaultDuration = options.duration ?? 5000;
     this.retryCount = options.retryCount ?? 3;
+    this.retryDelay = options.retryDelay ?? 200;
+    this.retryJitter = options.retryJitter ?? 100;
 
     this.redlock = new Redlock(options.clients, {
       driftFactor: options.driftFactor ?? 0.01,
       retryCount: this.retryCount,
-      retryDelay: options.retryDelay ?? 200,
-      retryJitter: options.retryJitter ?? 100,
+      retryDelay: this.retryDelay,
+      retryJitter: this.retryJitter,
     });
   }
 
@@ -45,13 +49,30 @@ export class LockService implements OnModuleDestroy {
    * Acquires a lock, executes the callback, then always releases the lock
    * in a finally block — even if the callback throws.
    *
+   * When `autoExtend` is true, a background interval extends the lock every
+   * `duration/2` ms so long-running callbacks never lose their lock.
+   *
    * @example
    * const result = await lockService.withLock(
    *   'booking:42',
    *   async () => createBooking(payload),
    * );
+   *
+   * @example
+   * // Auto-extend for long-running operations
+   * const result = await lockService.withLock(
+   *   'report:generate',
+   *   async () => generateReport(),
+   *   30000,
+   *   true,
+   * );
    */
-  async withLock<T>(resource: string, callback: () => Promise<T>, duration?: number): Promise<T> {
+  async withLock<T>(
+    resource: string,
+    callback: () => Promise<T>,
+    duration?: number,
+    autoExtend?: boolean,
+  ): Promise<T> {
     const key = this.buildKey(resource);
     const ttl = duration ?? this.defaultDuration;
     let lock: Lock;
@@ -60,13 +81,38 @@ export class LockService implements OnModuleDestroy {
       lock = await this.redlock.acquire([key], ttl);
       this.logger.debug(`Lock acquired for "${key}" (ttl: ${ttl}ms)`);
     } catch (err) {
-      this.logger.warn(`Failed to acquire lock for "${key}" after ${this.retryCount} attempts`);
-      throw new LockAcquisitionException(resource, this.retryCount);
+      const estimatedWaitMs = this.retryCount * (this.retryDelay + Math.floor(this.retryJitter / 2));
+      this.logger.warn(
+        `Failed to acquire lock for "${key}" after ${this.retryCount} retries (~${estimatedWaitMs}ms)`,
+      );
+      throw new LockAcquisitionException(resource, this.retryCount, estimatedWaitMs);
+    }
+
+    let extendInterval: ReturnType<typeof setInterval> | undefined;
+    if (autoExtend) {
+      extendInterval = setInterval(() => {
+        lock
+          .extend(ttl)
+          .then((extended) => {
+            lock = extended;
+            this.logger.debug(`Auto-extended lock for "${key}" (ttl: ${ttl}ms)`);
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(`Failed to auto-extend lock for "${key}": ${String(err)}`);
+            if (extendInterval !== undefined) {
+              clearInterval(extendInterval);
+              extendInterval = undefined;
+            }
+          });
+      }, Math.floor(ttl / 2));
     }
 
     try {
       return await callback();
     } finally {
+      if (extendInterval !== undefined) {
+        clearInterval(extendInterval);
+      }
       try {
         await lock.release();
         this.logger.debug(`Lock released for "${key}"`);
