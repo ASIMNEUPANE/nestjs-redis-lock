@@ -1,0 +1,15 @@
+// The redlock Lock type — exported as RedlockLock to avoid collision with the Lock decorator
+export type { Lock as RedlockLock } from 'redlock';
+
+export { Lock } from './lock.decorator';
+export { LockModule } from './lock.module';
+export { LockService } from './lock.service';
+export { LockInterceptor } from './lock.interceptor';
+
+export { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
+export { LockExtendException } from './exceptions/lock-extend.exception';
+
+export type { LockModuleOptions, LockModuleAsyncOptions } from './interfaces/lock-module-options';
+export type { LockDecoratorOptions } from './interfaces/lock-options';
+
+export { LOCK_MODULE_OPTIONS, LOCK_METADATA_KEY } from './constants';
