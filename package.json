@@ -1,12 +1,12 @@
 {
-  "name": "nestjs-redis-lock",
+  "name": "nestjs-redlock",
   "version": "0.1.0",
   "description": "Production-ready distributed locking for NestJS. Decorator-first, type-safe.",
   "author": "Asim Neupane <asimneupane11@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/asimneupane/nestjs-redis-lock.git"
+    "url": "git+https://github.com/asimneupane/nestjs-redis-lock.git"
   },
   "homepage": "https://github.com/asimneupane/nestjs-redis-lock#readme",
   "bugs": {

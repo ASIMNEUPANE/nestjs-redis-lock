@@ -1,7 +1,7 @@
-# nestjs-redis-lock
+# nestjs-redlock
 
-[![npm version](https://badge.fury.io/js/nestjs-redis-lock.svg)](https://badge.fury.io/js/nestjs-redis-lock)
-[![npm downloads](https://img.shields.io/npm/dw/nestjs-redis-lock.svg)](https://www.npmjs.com/package/nestjs-redis-lock)
+[![npm version](https://badge.fury.io/js/nestjs-redlock.svg)](https://badge.fury.io/js/nestjs-redlock)
+[![npm downloads](https://img.shields.io/npm/dw/nestjs-redlock.svg)](https://www.npmjs.com/package/nestjs-redlock)
 [![CI](https://github.com/asimneupane/nestjs-redis-lock/actions/workflows/ci.yml/badge.svg)](https://github.com/asimneupane/nestjs-redis-lock/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -9,9 +9,9 @@ Production-ready distributed locking for NestJS. Decorator-first, type-safe.
 
 ## Why this package?
 
-| Feature | nestjs-redis-lock | @anchan828/nest-redlock (archived) | nestjs-redlock |
+| Feature | nestjs-redlock | @anchan828/nest-redlock (archived) | nestjs-redis-lock |
 |---|---|---|---|
-| Maintained | ✅ Yes | ❌ Archived | ✅ Yes |
+| Maintained | ✅ Yes | ❌ Archived | ⚠️ Unmaintained |
 | `@Lock()` decorator | ✅ Yes | ✅ Yes | ❌ No |
 | `onFail: 'skip'` | ✅ Yes | ❌ No | ❌ No |
 | Dynamic lock keys | ✅ Yes | ❌ No | ❌ No |
@@ -23,7 +23,7 @@ Built from a production booking system handling 90,000+ route combinations.
 ## Install
 
 ```bash
-npm install nestjs-redis-lock ioredis
+npm install nestjs-redlock ioredis
 ```
 
 ## Quick Start
@@ -31,7 +31,7 @@ npm install nestjs-redis-lock ioredis
 **Register the module once in `AppModule`:**
 
 ```typescript
-import { LockModule } from 'nestjs-redis-lock';
+import { LockModule } from 'nestjs-redlock';
 import Redis from 'ioredis';
 
 @Module({
@@ -47,7 +47,7 @@ export class AppModule {}
 **Use the `@Lock()` decorator on any route handler:**
 
 ```typescript
-import { Lock } from 'nestjs-redis-lock';
+import { Lock } from 'nestjs-redlock';
 
 @Controller('bookings')
 export class BookingController {
@@ -62,7 +62,7 @@ export class BookingController {
 **Or use `LockService` directly:**
 
 ```typescript
-import { LockService } from 'nestjs-redis-lock';
+import { LockService } from 'nestjs-redlock';
 
 @Injectable()
 export class PaymentService {
