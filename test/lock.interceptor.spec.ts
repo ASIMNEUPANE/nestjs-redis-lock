@@ -55,7 +55,12 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler('result')).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith('my-resource', expect.any(Function), 3000);
+        expect(lockServiceWithLock).toHaveBeenCalledWith(
+          'my-resource',
+          expect.any(Function),
+          3000,
+          undefined,
+        );
         done();
       },
     });
@@ -73,6 +78,23 @@ describe('LockInterceptor', () => {
           'booking:42',
           expect.any(Function),
           undefined,
+          undefined,
+        );
+        done();
+      },
+    });
+  });
+
+  it('passes autoExtend option to withLock', (done) => {
+    reflectorGet.mockReturnValue({ key: 'res', duration: 10000, autoExtend: true });
+
+    interceptor.intercept(createContext(), createCallHandler()).subscribe({
+      next: () => {
+        expect(lockServiceWithLock).toHaveBeenCalledWith(
+          'res',
+          expect.any(Function),
+          10000,
+          true,
         );
         done();
       },
@@ -81,7 +103,7 @@ describe('LockInterceptor', () => {
 
   it('re-throws LockAcquisitionException when onFail is "throw"', (done) => {
     reflectorGet.mockReturnValue({ key: 'res', onFail: 'throw' });
-    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3));
+    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3, 750));
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       error: (err) => {
@@ -93,7 +115,7 @@ describe('LockInterceptor', () => {
 
   it('returns undefined when onFail is "skip" and lock acquisition fails', (done) => {
     reflectorGet.mockReturnValue({ key: 'res', onFail: 'skip' });
-    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3));
+    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3, 750));
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: (v) => {
@@ -118,7 +140,7 @@ describe('LockInterceptor', () => {
 
   it('defaults onFail to "throw" when not specified', (done) => {
     reflectorGet.mockReturnValue({ key: 'res' });
-    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3));
+    lockServiceWithLock.mockRejectedValue(new LockAcquisitionException('res', 3, 750));
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       error: (err) => {

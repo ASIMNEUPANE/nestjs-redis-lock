@@ -54,6 +54,7 @@ export class LockInterceptor implements NestInterceptor {
             });
           }),
         options.duration,
+        options.autoExtend,
       ),
     ).pipe(
       catchError((err: unknown) => {
