@@ -90,12 +90,7 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'res',
-          expect.any(Function),
-          10000,
-          true,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('res', expect.any(Function), 10000, true);
         done();
       },
     });

@@ -81,7 +81,8 @@ export class LockService implements OnModuleDestroy {
       lock = await this.redlock.acquire([key], ttl);
       this.logger.debug(`Lock acquired for "${key}" (ttl: ${ttl}ms)`);
     } catch (err) {
-      const estimatedWaitMs = this.retryCount * (this.retryDelay + Math.floor(this.retryJitter / 2));
+      const estimatedWaitMs =
+        this.retryCount * (this.retryDelay + Math.floor(this.retryJitter / 2));
       this.logger.warn(
         `Failed to acquire lock for "${key}" after ${this.retryCount} retries (~${estimatedWaitMs}ms)`,
       );
@@ -90,21 +91,24 @@ export class LockService implements OnModuleDestroy {
 
     let extendInterval: ReturnType<typeof setInterval> | undefined;
     if (autoExtend) {
-      extendInterval = setInterval(() => {
-        lock
-          .extend(ttl)
-          .then((extended) => {
-            lock = extended;
-            this.logger.debug(`Auto-extended lock for "${key}" (ttl: ${ttl}ms)`);
-          })
-          .catch((err: unknown) => {
-            this.logger.warn(`Failed to auto-extend lock for "${key}": ${String(err)}`);
-            if (extendInterval !== undefined) {
-              clearInterval(extendInterval);
-              extendInterval = undefined;
-            }
-          });
-      }, Math.floor(ttl / 2));
+      extendInterval = setInterval(
+        () => {
+          lock
+            .extend(ttl)
+            .then((extended) => {
+              lock = extended;
+              this.logger.debug(`Auto-extended lock for "${key}" (ttl: ${ttl}ms)`);
+            })
+            .catch((err: unknown) => {
+              this.logger.warn(`Failed to auto-extend lock for "${key}": ${String(err)}`);
+              if (extendInterval !== undefined) {
+                clearInterval(extendInterval);
+                extendInterval = undefined;
+              }
+            });
+        },
+        Math.floor(ttl / 2),
+      );
     }
 
     try {

@@ -225,7 +225,10 @@ describe('LockService', () => {
       let resolveCallback!: (v: string) => void;
       const callbackPromise = service.withLock(
         'long-job',
-        () => new Promise<string>((resolve) => { resolveCallback = resolve; }),
+        () =>
+          new Promise<string>((resolve) => {
+            resolveCallback = resolve;
+          }),
         1000,
         true,
       );
@@ -277,7 +280,9 @@ describe('LockService', () => {
 
       const callbackPromise = service.withLock(
         'fail-job',
-        async () => { throw new Error('oops'); },
+        async () => {
+          throw new Error('oops');
+        },
         1000,
         true,
       );
@@ -294,7 +299,10 @@ describe('LockService', () => {
       let resolveCallback!: (v: string) => void;
       const callbackPromise = service.withLock(
         'expiry-job',
-        () => new Promise<string>((resolve) => { resolveCallback = resolve; }),
+        () =>
+          new Promise<string>((resolve) => {
+            resolveCallback = resolve;
+          }),
         200, // interval fires at 100ms
         true,
       );
@@ -329,9 +337,7 @@ describe('LockService', () => {
 
     it('concurrent withLock calls all acquire independently', async () => {
       const results = await Promise.all(
-        Array.from({ length: 50 }, (_, i) =>
-          service.withLock(`resource-${i}`, async () => i),
-        ),
+        Array.from({ length: 50 }, (_, i) => service.withLock(`resource-${i}`, async () => i)),
       );
       expect(results).toHaveLength(50);
       expect(mockAcquire).toHaveBeenCalledTimes(50);
