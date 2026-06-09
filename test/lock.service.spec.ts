@@ -3,6 +3,7 @@ import { LockService } from '../src/lock.service';
 import { LOCK_MODULE_OPTIONS } from '../src/constants';
 import { LockAcquisitionException } from '../src/exceptions/lock-acquisition.exception';
 import { LockExtendException } from '../src/exceptions/lock-extend.exception';
+import { LockEvent } from '../src/lock.events';
 
 const mockRelease = jest.fn().mockResolvedValue(undefined);
 const mockExtend = jest.fn();
@@ -41,8 +42,12 @@ jest.mock('redlock', () => {
 describe('LockService', () => {
   let service: LockService;
 
+  const mockEval = jest.fn().mockResolvedValue(1);
+  const mockBrpop = jest.fn().mockResolvedValue(['lock:test-resource:queue', '1']);
+  const mockRpush = jest.fn().mockResolvedValue(1);
+
   const mockOptions = {
-    clients: [{}],
+    clients: [{ eval: mockEval, brpop: mockBrpop, rpush: mockRpush }],
     duration: 5000,
     retryCount: 3,
     retryDelay: 200,
@@ -55,6 +60,9 @@ describe('LockService', () => {
     jest.clearAllMocks();
     mockAcquire.mockResolvedValue(mockLock);
     mockRelease.mockResolvedValue(undefined);
+    mockEval.mockResolvedValue(1);
+    mockBrpop.mockResolvedValue(['lock:test-resource:queue', '1']);
+    mockRpush.mockResolvedValue(1);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [LockService, { provide: LOCK_MODULE_OPTIONS, useValue: mockOptions }],
@@ -365,6 +373,165 @@ describe('LockService', () => {
         }),
       ).rejects.toBe(callbackErr);
       expect(mockRelease).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('events (EventEmitter)', () => {
+    it('emits ACQUIRED event with resource and ttl on successful withLock', async () => {
+      const handler = jest.fn();
+      service.on(LockEvent.ACQUIRED, handler);
+      await service.withLock('pay', async () => 'ok', 3000);
+      expect(handler).toHaveBeenCalledWith('pay', 3000);
+    });
+
+    it('emits RELEASED event with resource and heldForMs on successful withLock', async () => {
+      const handler = jest.fn();
+      service.on(LockEvent.RELEASED, handler);
+      await service.withLock('pay', async () => 'ok', 3000);
+      expect(handler).toHaveBeenCalledWith('pay', expect.any(Number));
+    });
+
+    it('emits FAILED event with resource and reason when acquire fails', async () => {
+      mockAcquire.mockRejectedValueOnce(new Error('busy'));
+      const handler = jest.fn();
+      service.on(LockEvent.FAILED, handler);
+      await service.withLock('pay', async () => 'x').catch(() => null);
+      expect(handler).toHaveBeenCalledWith('pay', expect.stringContaining('busy'));
+    });
+
+    it('emits EXTENDED event from extend() method', async () => {
+      const extendedLock = { ...mockLock, expiration: Date.now() + 10000 };
+      mockExtend.mockResolvedValueOnce(extendedLock);
+      const handler = jest.fn();
+      service.on(LockEvent.EXTENDED, handler);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await service.extend(mockLock as any, 10000);
+      expect(handler).toHaveBeenCalledWith(mockLock.resources[0], 10000);
+    });
+
+    it('does not emit RELEASED when lock is not acquired', async () => {
+      mockAcquire.mockRejectedValueOnce(new Error('busy'));
+      const handler = jest.fn();
+      service.on(LockEvent.RELEASED, handler);
+      await service.withLock('pay', async () => 'x').catch(() => null);
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('lock groups (string[] resource)', () => {
+    it('acquires all resources in sorted order', async () => {
+      await service.withLock(['beta', 'alpha'], async () => 'ok');
+      expect(mockAcquire).toHaveBeenCalledWith(
+        ['lock:alpha', 'lock:beta'],
+        expect.any(Number),
+      );
+    });
+
+    it('returns callback result for group lock', async () => {
+      const result = await service.withLock(['a', 'b'], async () => 'group-result');
+      expect(result).toBe('group-result');
+    });
+
+    it('releases group lock in finally even when callback throws', async () => {
+      await expect(
+        service.withLock(['a', 'b'], async () => {
+          throw new Error('fail');
+        }),
+      ).rejects.toThrow('fail');
+      expect(mockRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws LockAcquisitionException when group acquisition fails', async () => {
+      mockAcquire.mockRejectedValueOnce(new Error('locked'));
+      await expect(service.withLock(['x', 'y'], async () => 'ok')).rejects.toBeInstanceOf(
+        LockAcquisitionException,
+      );
+    });
+
+    it('sorts resources to prevent deadlock regardless of input order', async () => {
+      await service.withLock(['z', 'a', 'm'], async () => null);
+      expect(mockAcquire).toHaveBeenCalledWith(
+        ['lock:a', 'lock:m', 'lock:z'],
+        expect.any(Number),
+      );
+    });
+
+    it('emits ACQUIRED with sorted resource label', async () => {
+      const handler = jest.fn();
+      service.on(LockEvent.ACQUIRED, handler);
+      await service.withLock(['beta', 'alpha'], async () => null, 2000);
+      expect(handler).toHaveBeenCalledWith('alpha,beta', 2000);
+    });
+
+    it('emits RELEASED with sorted resource label', async () => {
+      const handler = jest.fn();
+      service.on(LockEvent.RELEASED, handler);
+      await service.withLock(['beta', 'alpha'], async () => null);
+      expect(handler).toHaveBeenCalledWith('alpha,beta', expect.any(Number));
+    });
+  });
+
+  describe('queued locking (queue: true)', () => {
+    it('initializes queue via Lua eval', async () => {
+      await service.withLock('res', async () => 'ok', 1000, false, true);
+      expect(mockEval).toHaveBeenCalledWith(expect.stringContaining('RPUSH'), 1, 'lock:res:queue');
+    });
+
+    it('acquires lock via BRPOP', async () => {
+      await service.withLock('res', async () => 'ok', 1000, false, true);
+      expect(mockBrpop).toHaveBeenCalledWith('lock:res:queue', expect.any(Number));
+    });
+
+    it('returns token via RPUSH after callback completes', async () => {
+      await service.withLock('res', async () => 'ok', 1000, false, true);
+      expect(mockRpush).toHaveBeenCalledWith('lock:res:queue', '1');
+    });
+
+    it('returns callback result', async () => {
+      const result = await service.withLock('res', async () => 42, 1000, false, true);
+      expect(result).toBe(42);
+    });
+
+    it('returns token even when callback throws', async () => {
+      await expect(
+        service.withLock(
+          'res',
+          async () => {
+            throw new Error('boom');
+          },
+          1000,
+          false,
+          true,
+        ),
+      ).rejects.toThrow('boom');
+      expect(mockRpush).toHaveBeenCalledWith('lock:res:queue', '1');
+    });
+
+    it('throws LockAcquisitionException when BRPOP times out (returns null)', async () => {
+      mockBrpop.mockResolvedValueOnce(null);
+      await expect(
+        service.withLock('res', async () => 'ok', 1000, false, true),
+      ).rejects.toBeInstanceOf(LockAcquisitionException);
+    });
+
+    it('emits ACQUIRED and RELEASED events for queued lock', async () => {
+      const acquired = jest.fn();
+      const released = jest.fn();
+      service.on(LockEvent.ACQUIRED, acquired);
+      service.on(LockEvent.RELEASED, released);
+
+      await service.withLock('res', async () => null, 1000, false, true);
+
+      expect(acquired).toHaveBeenCalledWith('res', 1000);
+      expect(released).toHaveBeenCalledWith('res', expect.any(Number));
+    });
+
+    it('emits FAILED event when BRPOP times out', async () => {
+      mockBrpop.mockResolvedValueOnce(null);
+      const handler = jest.fn();
+      service.on(LockEvent.FAILED, handler);
+      await service.withLock('res', async () => null, 1000, false, true).catch(() => null);
+      expect(handler).toHaveBeenCalledWith('res', expect.stringContaining('timeout'));
     });
   });
 });

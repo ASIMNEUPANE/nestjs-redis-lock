@@ -60,6 +60,7 @@ describe('LockInterceptor', () => {
           expect.any(Function),
           3000,
           undefined,
+          undefined,
         );
         done();
       },
@@ -79,6 +80,7 @@ describe('LockInterceptor', () => {
           expect.any(Function),
           undefined,
           undefined,
+          undefined,
         );
         done();
       },
@@ -90,7 +92,49 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith('res', expect.any(Function), 10000, true);
+        expect(lockServiceWithLock).toHaveBeenCalledWith(
+          'res',
+          expect.any(Function),
+          10000,
+          true,
+          undefined,
+        );
+        done();
+      },
+    });
+  });
+
+  it('passes queue option to withLock', (done) => {
+    reflectorGet.mockReturnValue({ key: 'res', duration: 5000, queue: true });
+
+    interceptor.intercept(createContext(), createCallHandler()).subscribe({
+      next: () => {
+        expect(lockServiceWithLock).toHaveBeenCalledWith(
+          'res',
+          expect.any(Function),
+          5000,
+          undefined,
+          true,
+        );
+        done();
+      },
+    });
+  });
+
+  it('resolves string[] key from dynamic function', (done) => {
+    reflectorGet.mockReturnValue({
+      key: (_args: unknown[]) => ['seat:A1', 'seat:B2'],
+    });
+
+    interceptor.intercept(createContext(), createCallHandler()).subscribe({
+      next: () => {
+        expect(lockServiceWithLock).toHaveBeenCalledWith(
+          ['seat:A1', 'seat:B2'],
+          expect.any(Function),
+          undefined,
+          undefined,
+          undefined,
+        );
         done();
       },
     });
