@@ -10,6 +10,9 @@ export { LockHealthIndicator } from './lock.health';
 export { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
 export { LockExtendException } from './exceptions/lock-extend.exception';
 
+export { LockEvent } from './lock.events';
+export type { LockEventType } from './lock.events';
+
 export type { LockModuleOptions, LockModuleAsyncOptions } from './interfaces/lock-module-options';
 export type { LockDecoratorOptions } from './interfaces/lock-options';
 
