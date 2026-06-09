@@ -5,6 +5,7 @@ export { Lock } from './lock.decorator';
 export { LockModule } from './lock.module';
 export { LockService } from './lock.service';
 export { LockInterceptor } from './lock.interceptor';
+export { LockHealthIndicator } from './lock.health';
 
 export { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
 export { LockExtendException } from './exceptions/lock-extend.exception';
