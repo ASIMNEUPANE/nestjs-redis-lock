@@ -10,12 +10,16 @@
  */
 export interface LockDecoratorOptions {
   /**
-   * The lock resource key. Can be a static string or a function
-   * that receives the method arguments and returns a string.
-   * Final key will be prefixed: `{keyPrefix}:{key}`.
+   * The lock resource key. Can be:
+   * - A static string: `'payment:process'`
+   * - A string array for lock groups (atomic multi-resource): `['seat:A1', 'seat:B2']`
+   * - A function returning a string or string array (receives method args)
+   *
+   * Final keys are prefixed: `{keyPrefix}:{key}`.
+   * For lock groups, resources are acquired in sorted order to prevent deadlock.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  key: string | ((...args: any[]) => string);
+  key: string | string[] | ((...args: any[]) => string | string[]);
 
   /**
    * Lock TTL in milliseconds. Overrides the module-level default.
@@ -32,8 +36,17 @@ export interface LockDecoratorOptions {
   onFail?: 'throw' | 'skip';
 
   /**
-   * Reserved for Phase 2: automatically extends the lock at duration/2 intervals.
+   * Automatically extends the lock at duration/2 intervals so long-running
+   * callbacks never lose their lock mid-execution.
    * @default false
    */
   autoExtend?: boolean;
+
+  /**
+   * Enable FIFO queued locking. Callers block in arrival order (Redis BRPOP)
+   * instead of competing with random retry jitter — eliminates thundering herd.
+   * Uses the first Redis client in `LockModuleOptions.clients`.
+   * @default false
+   */
+  queue?: boolean;
 }
