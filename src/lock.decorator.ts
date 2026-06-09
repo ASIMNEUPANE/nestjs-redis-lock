@@ -20,8 +20,5 @@ import { LOCK_METADATA_KEY } from './constants';
  * async createBooking(\@Body() dto: CreateBookingDto): Promise<Booking> { ... }
  */
 export function Lock(options: LockDecoratorOptions): MethodDecorator {
-  return applyDecorators(
-    SetMetadata(LOCK_METADATA_KEY, options),
-    UseInterceptors(LockInterceptor),
-  );
+  return applyDecorators(SetMetadata(LOCK_METADATA_KEY, options), UseInterceptors(LockInterceptor));
 }

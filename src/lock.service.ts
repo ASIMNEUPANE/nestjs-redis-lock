@@ -51,11 +51,7 @@ export class LockService implements OnModuleDestroy {
    *   async () => createBooking(payload),
    * );
    */
-  async withLock<T>(
-    resource: string,
-    callback: () => Promise<T>,
-    duration?: number,
-  ): Promise<T> {
+  async withLock<T>(resource: string, callback: () => Promise<T>, duration?: number): Promise<T> {
     const key = this.buildKey(resource);
     const ttl = duration ?? this.defaultDuration;
     let lock: Lock;
@@ -64,9 +60,7 @@ export class LockService implements OnModuleDestroy {
       lock = await this.redlock.acquire([key], ttl);
       this.logger.debug(`Lock acquired for "${key}" (ttl: ${ttl}ms)`);
     } catch (err) {
-      this.logger.warn(
-        `Failed to acquire lock for "${key}" after ${this.retryCount} attempts`,
-      );
+      this.logger.warn(`Failed to acquire lock for "${key}" after ${this.retryCount} attempts`);
       throw new LockAcquisitionException(resource, this.retryCount);
     }
 

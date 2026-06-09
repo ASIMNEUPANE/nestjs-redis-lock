@@ -55,11 +55,7 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler('result')).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'my-resource',
-          expect.any(Function),
-          3000,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('my-resource', expect.any(Function), 3000);
         done();
       },
     });

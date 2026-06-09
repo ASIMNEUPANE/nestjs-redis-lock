@@ -1,10 +1,4 @@
-import {
-  Injectable,
-  NestInterceptor,
-  ExecutionContext,
-  CallHandler,
-  Logger,
-} from '@nestjs/common';
+import { Injectable, NestInterceptor, ExecutionContext, CallHandler, Logger } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Observable, from, of } from 'rxjs';
 import { catchError, switchMap } from 'rxjs/operators';
@@ -44,9 +38,7 @@ export class LockInterceptor implements NestInterceptor {
     }
 
     const resolvedKey =
-      typeof options.key === 'function'
-        ? options.key(context.getArgs())
-        : options.key;
+      typeof options.key === 'function' ? options.key(context.getArgs()) : options.key;
 
     const onFail = options.onFail ?? 'throw';
 
@@ -66,9 +58,7 @@ export class LockInterceptor implements NestInterceptor {
     ).pipe(
       catchError((err: unknown) => {
         if (onFail === 'skip' && err instanceof LockAcquisitionException) {
-          this.logger.debug(
-            `Lock acquisition skipped for "${resolvedKey}" (onFail: 'skip')`,
-          );
+          this.logger.debug(`Lock acquisition skipped for "${resolvedKey}" (onFail: 'skip')`);
           return of(undefined);
         }
         throw err;

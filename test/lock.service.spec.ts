@@ -22,7 +22,10 @@ jest.mock('redlock', () => {
   }));
   class MockExecutionError extends Error {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    constructor(message: string, public attempts: any[]) {
+    constructor(
+      message: string,
+      public attempts: any[],
+    ) {
       super(message);
     }
   }
@@ -54,10 +57,7 @@ describe('LockService', () => {
     mockRelease.mockResolvedValue(undefined);
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        LockService,
-        { provide: LOCK_MODULE_OPTIONS, useValue: mockOptions },
-      ],
+      providers: [LockService, { provide: LOCK_MODULE_OPTIONS, useValue: mockOptions }],
     }).compile();
 
     service = module.get<LockService>(LockService);
@@ -90,8 +90,9 @@ describe('LockService', () => {
     it('throws LockAcquisitionException when acquire fails', async () => {
       mockAcquire.mockRejectedValueOnce(new Error('lock busy'));
 
-      await expect(service.withLock('test-resource', async () => 'x'))
-        .rejects.toBeInstanceOf(LockAcquisitionException);
+      await expect(service.withLock('test-resource', async () => 'x')).rejects.toBeInstanceOf(
+        LockAcquisitionException,
+      );
     });
 
     it('does not re-throw if release fails', async () => {
@@ -150,8 +151,9 @@ describe('LockService', () => {
     it('throws LockExtendException on failure', async () => {
       mockExtend.mockRejectedValueOnce(new Error('expired'));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await expect(service.extend(mockLock as any, 5000))
-        .rejects.toBeInstanceOf(LockExtendException);
+      await expect(service.extend(mockLock as any, 5000)).rejects.toBeInstanceOf(
+        LockExtendException,
+      );
     });
   });
 
