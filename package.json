@@ -1,6 +1,6 @@
 {
   "name": "nestjs-redlock",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Production-ready distributed locking for NestJS. Decorator-first, type-safe.",
   "author": "Asim Neupane <asimneupane11@gmail.com>",
   "license": "MIT",

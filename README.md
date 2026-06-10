@@ -124,9 +124,11 @@ const busy = await lockService.isLocked('payment:process');
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `key` | `string \| ((args) => string)` | **required** | Lock resource key. Static string or dynamic function. |
+| `key` | `string \| string[] \| ((args) => string \| string[])` | **required** | Lock resource key. Static, array, or dynamic function. |
 | `duration` | `number` | Module default (5000ms) | Lock TTL in milliseconds. |
 | `onFail` | `'throw' \| 'skip'` | `'throw'` | Behavior when lock is unavailable. `'skip'` returns `undefined` silently. |
+| `autoExtend` | `boolean` | `false` | Automatically re-extend the lock every `duration/2` ms until the callback completes. |
+| `queue` | `boolean` | `false` | FIFO queue via Redis List. Requests wait in order instead of competing with jitter. |
 
 ### Static key
 
@@ -142,11 +144,37 @@ async generateReport(): Promise<Report> { ... }
 async createBooking(@Body() dto: CreateBookingDto) { ... }
 ```
 
-### Skip on failure (idempotent jobs)
+### Skip on failure (cron deduplication)
 
 ```typescript
+// Only one instance in a cluster runs this job per tick
+@Cron(CronExpression.EVERY_10_SECONDS)
 @Lock({ key: 'cron:cleanup', onFail: 'skip' })
 async cleanupExpiredSessions() { ... }
+```
+
+### Lock groups (multi-resource atomic locking)
+
+```typescript
+// Acquire all seats atomically. Sorted key order prevents deadlocks.
+@Lock({ key: (args) => [`seat:${args[0].seatA}`, `seat:${args[0].seatB}`] })
+async swapSeats(@Body() dto: SwapDto) { ... }
+```
+
+### Auto-extend for long-running operations
+
+```typescript
+// Lock automatically re-extends every duration/2 ms
+@Lock({ key: 'report:generate', duration: 30000, autoExtend: true })
+async generateHeavyReport() { ... }
+```
+
+### FIFO queue (fair locking)
+
+```typescript
+// Requests are served first-come-first-served, not random retry
+@Lock({ key: 'checkout:process', queue: true })
+async processCheckout(@Body() dto: CheckoutDto) { ... }
 ```
 
 ## Configuration
@@ -201,12 +229,133 @@ LockModule.register({
 | `driftFactor` | `0.01` | Clock drift compensation factor |
 | `keyPrefix` | `'lock'` | Prefix for all Redis lock keys |
 
+## Events (Prometheus / DataDog / Sentry)
+
+`LockService` extends Node's `EventEmitter`. Hook into lock lifecycle events for metrics and alerting:
+
+```typescript
+import { LockService, LockEvent } from 'nestjs-redlock';
+
+@Injectable()
+export class MetricsService {
+  constructor(lockService: LockService) {
+    lockService.on(LockEvent.ACQUIRED, (resource: string, duration: number) => {
+      prometheus.counter('lock_acquired_total').inc({ resource });
+    });
+
+    lockService.on(LockEvent.RELEASED, (resource: string, heldForMs: number) => {
+      prometheus.histogram('lock_held_duration_ms').observe({ resource }, heldForMs);
+    });
+
+    lockService.on(LockEvent.FAILED, (resource: string, reason: Error) => {
+      sentry.captureException(reason, { extra: { resource } });
+    });
+
+    lockService.on(LockEvent.EXTENDED, (resource: string, newDuration: number) => {
+      prometheus.counter('lock_extended_total').inc({ resource });
+    });
+  }
+}
+```
+
+| Event | Arguments | Fired when |
+|---|---|---|
+| `LockEvent.ACQUIRED` | `resource, duration` | Lock successfully acquired |
+| `LockEvent.RELEASED` | `resource, heldForMs` | Lock released (success or error) |
+| `LockEvent.FAILED` | `resource, error` | Lock acquisition failed |
+| `LockEvent.EXTENDED` | `resource, newDuration` | Lock TTL extended |
+
+## Testing (FakeLockService)
+
+Replace `LockService` with `FakeLockService` in unit tests — no Redis required:
+
+```typescript
+import { FakeLockService } from 'nestjs-redlock/testing';
+import { LockService } from 'nestjs-redlock';
+
+describe('PaymentService', () => {
+  let service: PaymentService;
+
+  beforeEach(async () => {
+    const module = await Test.createTestingModule({
+      providers: [
+        PaymentService,
+        { provide: LockService, useClass: FakeLockService },
+      ],
+    }).compile();
+
+    service = module.get(PaymentService);
+  });
+
+  it('processes payment', async () => {
+    // withLock() simply runs the callback — no Redis, no retries
+    await expect(service.processPayment('order-123')).resolves.toBeDefined();
+  });
+});
+```
+
 ## Error Handling
 
 | Exception | HTTP Status | When |
 |---|---|---|
 | `LockAcquisitionException` | 409 Conflict | Lock unavailable after all retries (when `onFail: 'throw'`) |
 | `LockExtendException` | 500 Internal Server Error | Lock expired before `extend()` could run |
+
+## Migrating from `@anchan828/nest-redlock`
+
+`@anchan828/nest-redlock` has been archived and is no longer maintained. Here's how to migrate in 3 steps.
+
+### 1. Update dependencies
+
+```bash
+npm uninstall @anchan828/nest-redlock
+npm install nestjs-redlock
+```
+
+### 2. Update module registration
+
+```typescript
+// Before
+import { RedlockModule } from '@anchan828/nest-redlock';
+RedlockModule.registerAsync({
+  useFactory: () => ({
+    clients: [new Redis()],
+    settings: { retryCount: 3 },
+  }),
+})
+
+// After
+import { LockModule } from 'nestjs-redlock';
+LockModule.register({
+  clients: [new Redis()],
+  retryCount: 3,        // flat options — no nested "settings" object
+})
+```
+
+### 3. Update decorators
+
+```typescript
+// Before
+import { Redlock } from '@anchan828/nest-redlock';
+@Redlock(['resource'])
+async myMethod() { ... }
+
+// After
+import { Lock } from 'nestjs-redlock';
+@Lock({ key: 'resource' })
+async myMethod() { ... }
+```
+
+### What you gain
+
+- **Dynamic lock keys** — `key: (args) => \`booking:\${args[0].id}\``
+- **`onFail: 'skip'`** — silent skip for cron jobs, no try/catch needed
+- **Lock groups** — atomic multi-resource locking with deadlock prevention
+- **Event emitter** — Prometheus/DataDog/Sentry hooks
+- **FIFO queued locking** — fair ordering instead of random retry stampede
+- **`FakeLockService`** — unit tests with zero Redis dependency
+- **Dual CJS + ESM** — works in modern ESM projects
+- **Active maintenance** — no archived package risk
 
 ## License
 
