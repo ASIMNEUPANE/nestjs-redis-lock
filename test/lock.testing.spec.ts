@@ -83,9 +83,7 @@ describe('FakeLockService', () => {
     it('can replace LockService via useClass in test modules', async () => {
       // Verify FakeLockService can be used as a LockService substitute via DI
       const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          { provide: 'LockServiceToken', useClass: FakeLockService },
-        ],
+        providers: [{ provide: 'LockServiceToken', useClass: FakeLockService }],
       }).compile();
 
       const svc = module.get<FakeLockService>('LockServiceToken');

@@ -24,10 +24,9 @@ export class BookingController {
    */
   @Post()
   @Lock({
-    key: (args: unknown[]) => {
-      const dto = args[0] as BookSeatDto;
-      return `seat:${dto.locationId}:${dto.seatId}`;
-    },
+    // The key function receives the handler's own arguments, spread — so this
+    // is the DTO itself, already through validation pipes.
+    key: (dto: BookSeatDto) => `seat:${dto.locationId}:${dto.seatId}`,
     duration: 10_000,
     onFail: 'throw',
   })

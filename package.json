@@ -1,6 +1,6 @@
 {
   "name": "nestjs-redlock",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Production-ready distributed locking for NestJS. Decorator-first, type-safe.",
   "author": "Asim Neupane <asimneupane11@gmail.com>",
   "license": "MIT",
@@ -45,6 +45,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
@@ -55,9 +56,11 @@
     "test": "jest",
     "test:cov": "jest --coverage",
     "test:watch": "jest --watch",
-    "lint": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "test:e2e": "jest --config jest.integration.config.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" && npm run typecheck",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run lint && npm run build && npm test"
   },
   "dependencies": {
     "redlock": "^5.0.0-beta.2"
@@ -76,6 +79,7 @@
   "devDependencies": {
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
+    "@nestjs/schedule": "^6.0.0",
     "@nestjs/terminus": "^11.1.1",
     "@nestjs/testing": "^11.0.0",
     "@types/jest": "^29.5.0",

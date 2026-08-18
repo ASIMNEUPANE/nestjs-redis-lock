@@ -55,33 +55,31 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler('result')).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'my-resource',
-          expect.any(Function),
-          3000,
-          undefined,
-          undefined,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('my-resource', expect.any(Function), {
+          duration: 3000,
+          autoExtend: undefined,
+          queue: undefined,
+        });
         done();
       },
     });
   });
 
-  it('resolves dynamic key using context arguments', (done) => {
-    // key function receives context.getArgs() as a single array argument
+  // Legacy path: the interceptor can only see ExecutionContext.getArgs(), which
+  // for HTTP is [req, res, next] — not the handler's parameters. This is exactly
+  // why @Lock() no longer uses it. Documented here, not endorsed.
+  it('resolves dynamic key from ExecutionContext.getArgs() (legacy semantics)', (done) => {
     reflectorGet.mockReturnValue({
       key: (args: unknown[]) => `booking:${(args[0] as { id: number }).id}`,
     });
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'booking:42',
-          expect.any(Function),
-          undefined,
-          undefined,
-          undefined,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('booking:42', expect.any(Function), {
+          duration: undefined,
+          autoExtend: undefined,
+          queue: undefined,
+        });
         done();
       },
     });
@@ -92,13 +90,11 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'res',
-          expect.any(Function),
-          10000,
-          true,
-          undefined,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('res', expect.any(Function), {
+          duration: 10000,
+          autoExtend: true,
+          queue: undefined,
+        });
         done();
       },
     });
@@ -109,13 +105,11 @@ describe('LockInterceptor', () => {
 
     interceptor.intercept(createContext(), createCallHandler()).subscribe({
       next: () => {
-        expect(lockServiceWithLock).toHaveBeenCalledWith(
-          'res',
-          expect.any(Function),
-          5000,
-          undefined,
-          true,
-        );
+        expect(lockServiceWithLock).toHaveBeenCalledWith('res', expect.any(Function), {
+          duration: 5000,
+          autoExtend: undefined,
+          queue: true,
+        });
         done();
       },
     });
@@ -131,9 +125,7 @@ describe('LockInterceptor', () => {
         expect(lockServiceWithLock).toHaveBeenCalledWith(
           ['seat:A1', 'seat:B2'],
           expect.any(Function),
-          undefined,
-          undefined,
-          undefined,
+          { duration: undefined, autoExtend: undefined, queue: undefined },
         );
         done();
       },

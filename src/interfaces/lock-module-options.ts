@@ -26,6 +26,17 @@ export interface LockModuleOptions {
   driftFactor?: number;
   /** Prefix prepended to all lock keys: `{keyPrefix}:{resource}`. @default 'lock' */
   keyPrefix?: string;
+  /**
+   * Close the Redis clients when the module is destroyed.
+   *
+   * Off by default: you constructed these clients and may share them with the
+   * rest of your app, so shutting the lock module down should not take your
+   * application's Redis connections with it. Enable it only when the clients
+   * exist solely for locking.
+   *
+   * @default false
+   */
+  closeClientsOnDestroy?: boolean;
 }
 
 /**

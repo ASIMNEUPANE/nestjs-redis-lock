@@ -44,7 +44,7 @@ import Redis from 'ioredis';
 export class AppModule {}
 ```
 
-**Use the `@Lock()` decorator on any route handler:**
+**Use the `@Lock()` decorator on any method** — route handlers, `@Cron()` jobs, queue consumers, plain providers:
 
 ```typescript
 import { Lock } from 'nestjs-redlock';
@@ -52,7 +52,7 @@ import { Lock } from 'nestjs-redlock';
 @Controller('bookings')
 export class BookingController {
   @Post()
-  @Lock({ key: (args) => `booking:${args[0].propertyId}`, onFail: 'throw' })
+  @Lock({ key: (dto: CreateBookingDto) => `booking:${dto.propertyId}`, onFail: 'throw' })
   async create(@Body() dto: CreateBookingDto) {
     return this.bookingService.create(dto);
   }
@@ -124,11 +124,11 @@ const busy = await lockService.isLocked('payment:process');
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `key` | `string \| string[] \| ((args) => string \| string[])` | **required** | Lock resource key. Static, array, or dynamic function. |
+| `key` | `string \| string[] \| ((...args) => string \| string[])` | **required** | Lock resource key. Static, array, or a function receiving the method's own arguments. |
 | `duration` | `number` | Module default (5000ms) | Lock TTL in milliseconds. |
 | `onFail` | `'throw' \| 'skip'` | `'throw'` | Behavior when lock is unavailable. `'skip'` returns `undefined` silently. |
 | `autoExtend` | `boolean` | `false` | Automatically re-extend the lock every `duration/2` ms until the callback completes. |
-| `queue` | `boolean` | `false` | FIFO queue via Redis List. Requests wait in order instead of competing with jitter. |
+| `queue` | `boolean` | `false` | FIFO fairness. Callers are served in arrival order instead of competing with retry jitter. |
 
 ### Static key
 
@@ -140,7 +140,7 @@ async generateReport(): Promise<Report> { ... }
 ### Dynamic key
 
 ```typescript
-@Lock({ key: (args) => `booking:${args[0].propertyId}` })
+@Lock({ key: (dto: CreateBookingDto) => `booking:${dto.propertyId}` })
 async createBooking(@Body() dto: CreateBookingDto) { ... }
 ```
 
@@ -157,7 +157,7 @@ async cleanupExpiredSessions() { ... }
 
 ```typescript
 // Acquire all seats atomically. Sorted key order prevents deadlocks.
-@Lock({ key: (args) => [`seat:${args[0].seatA}`, `seat:${args[0].seatB}`] })
+@Lock({ key: (dto: SwapDto) => [`seat:${dto.seatA}`, `seat:${dto.seatB}`] })
 async swapSeats(@Body() dto: SwapDto) { ... }
 ```
 
@@ -172,10 +172,14 @@ async generateHeavyReport() { ... }
 ### FIFO queue (fair locking)
 
 ```typescript
-// Requests are served first-come-first-served, not random retry
+// Callers are served first-come-first-served, not by random retry
 @Lock({ key: 'checkout:process', queue: true })
 async processCheckout(@Body() dto: CheckoutDto) { ... }
 ```
+
+Ordering comes from a Redis sorted set keyed on a monotonic sequence; mutual
+exclusion still comes from the underlying Redlock lock, so a crashed holder is
+released by its TTL rather than stalling the queue.
 
 ## Configuration
 
@@ -301,6 +305,44 @@ describe('PaymentService', () => {
 | `LockAcquisitionException` | 409 Conflict | Lock unavailable after all retries (when `onFail: 'throw'`) |
 | `LockExtendException` | 500 Internal Server Error | Lock expired before `extend()` could run |
 
+## Operational notes (read before production)
+
+Distributed locking has real failure modes. These are the ones that matter here.
+
+**A single Redis node is not fault-tolerant.** Redlock's guarantees come from a
+quorum across independent masters. With `clients: [oneRedis]` you get a
+convenient mutex, but if that node fails or fails over to a replica that hasn't
+received the lock key, two holders can exist at once. Use 3 or 5 *independent*
+masters (not a primary plus replicas) when correctness matters.
+
+```typescript
+LockModule.register({
+  clients: [new Redis(node1), new Redis(node2), new Redis(node3)],
+});
+```
+
+**Locks are time-based, not fenced.** A lock can expire while your callback is
+still running — GC pause, slow query, network stall — and another worker may
+then hold it legitimately. `autoExtend: true` narrows that window but cannot
+close it. For operations where a double-execution is unacceptable, make the
+protected write idempotent or guard it with a fencing token / conditional
+update in your database. This is the well-known critique of Redlock, and it
+applies to every Redis-based lock, this one included.
+
+**Cluster and Sentinel.** Redis Cluster does not give Redlock independent
+masters — a lock key lives on one shard, so a shard failover has the same
+split-brain exposure as a single node. Prefer separate standalone masters.
+With Sentinel, point each client at a different Sentinel-managed master rather
+than several clients at the same one.
+
+**Key prefixes.** All keys are namespaced `{keyPrefix}:{resource}` (default
+`lock`). Give each application its own `keyPrefix` when several share a Redis,
+or unrelated services will contend on identical resource names.
+
+**`redlock@5` is still a beta release.** It is the most complete Redlock
+implementation for Node and is in wide production use, but the version pinned
+here (`^5.0.0-beta.2`) carries that label upstream.
+
 ## Migrating from `@anchan828/nest-redlock`
 
 `@anchan828/nest-redlock` has been archived and is no longer maintained. Here's how to migrate in 3 steps.
@@ -348,7 +390,7 @@ async myMethod() { ... }
 
 ### What you gain
 
-- **Dynamic lock keys** — `key: (args) => \`booking:\${args[0].id}\``
+- **Dynamic lock keys** — `key: (dto) => \`booking:\${dto.id}\``
 - **`onFail: 'skip'`** — silent skip for cron jobs, no try/catch needed
 - **Lock groups** — atomic multi-resource locking with deadlock prevention
 - **Event emitter** — Prometheus/DataDog/Sentry hooks

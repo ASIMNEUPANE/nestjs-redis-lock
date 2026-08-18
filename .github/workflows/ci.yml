@@ -29,4 +29,11 @@ jobs:
 
       - run: npm run test:cov
 
+      # Mutual exclusion cannot be verified against a mock — this is the suite
+      # that proves the locks actually lock. It uses the Redis service above.
+      - run: npm run test:e2e
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+
       - run: npm run build

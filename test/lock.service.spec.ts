@@ -39,15 +39,43 @@ jest.mock('redlock', () => {
   };
 });
 
+/**
+ * Builds a redlock ExecutionError whose final attempt voted against for the
+ * given reasons — the shape LockService inspects to tell contention apart
+ * from an unreachable Redis.
+ */
+function executionError(votesAgainst: Error[]) {
+  const { ExecutionError } = jest.requireMock('redlock');
+  const stats = {
+    membershipSize: 1,
+    quorumSize: 1,
+    votesFor: new Set(),
+    votesAgainst: new Map(votesAgainst.map((err, i) => [`client-${i}`, err])),
+  };
+  return new ExecutionError('The operation was unable to achieve a quorum', [
+    Promise.resolve(stats),
+  ]);
+}
+
 describe('LockService', () => {
   let service: LockService;
 
-  const mockEval = jest.fn().mockResolvedValue(1);
-  const mockBrpop = jest.fn().mockResolvedValue(['lock:test-resource:queue', '1']);
-  const mockRpush = jest.fn().mockResolvedValue(1);
+  const mockZadd = jest.fn().mockResolvedValue(1);
+  const mockZrem = jest.fn().mockResolvedValue(1);
+  const mockZrange = jest.fn();
+  const mockIncr = jest.fn().mockResolvedValue(1);
+  const mockExists = jest.fn().mockResolvedValue(0);
 
   const mockOptions = {
-    clients: [{ eval: mockEval, brpop: mockBrpop, rpush: mockRpush }],
+    clients: [
+      {
+        zadd: mockZadd,
+        zrem: mockZrem,
+        zrange: mockZrange,
+        incr: mockIncr,
+        exists: mockExists,
+      },
+    ],
     duration: 5000,
     retryCount: 3,
     retryDelay: 200,
@@ -56,13 +84,19 @@ describe('LockService', () => {
     keyPrefix: 'lock',
   };
 
+  /** Makes the caller the head of the queue on every poll. */
+  const beHeadOfQueue = () =>
+    mockZrange.mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
   beforeEach(async () => {
     jest.clearAllMocks();
     mockAcquire.mockResolvedValue(mockLock);
     mockRelease.mockResolvedValue(undefined);
-    mockEval.mockResolvedValue(1);
-    mockBrpop.mockResolvedValue(['lock:test-resource:queue', '1']);
-    mockRpush.mockResolvedValue(1);
+    mockZadd.mockResolvedValue(1);
+    mockZrem.mockResolvedValue(1);
+    mockIncr.mockResolvedValue(1);
+    mockExists.mockResolvedValue(0);
+    beHeadOfQueue();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [LockService, { provide: LOCK_MODULE_OPTIONS, useValue: mockOptions }],
@@ -131,9 +165,8 @@ describe('LockService', () => {
       expect(lock).toBe(mockLock);
     });
 
-    it('returns null when ExecutionError is thrown', async () => {
-      const { ExecutionError } = jest.requireMock('redlock');
-      mockAcquire.mockRejectedValueOnce(new ExecutionError('fail', []));
+    it('returns null when the resource is genuinely held', async () => {
+      mockAcquire.mockRejectedValueOnce(executionError([new Error('resource is locked')]));
       const lock = await service.tryLock('res');
       expect(lock).toBeNull();
     });
@@ -143,6 +176,31 @@ describe('LockService', () => {
       mockAcquire.mockRejectedValueOnce(new ResourceLockedError('locked'));
       const lock = await service.tryLock('res');
       expect(lock).toBeNull();
+    });
+
+    // Redlock reports "held by someone else" and "Redis is down" as the same
+    // ExecutionError. Conflating them made the health check permanently green.
+    it('re-throws when the quorum failed because Redis is unreachable', async () => {
+      const connErr = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:6379'), {
+        code: 'ECONNREFUSED',
+      });
+      const { ExecutionError } = jest.requireMock('redlock');
+      mockAcquire.mockRejectedValueOnce(executionError([connErr]));
+      await expect(service.tryLock('res')).rejects.toBeInstanceOf(ExecutionError);
+    });
+
+    it('re-throws when a connection is closed mid-flight', async () => {
+      const { ExecutionError } = jest.requireMock('redlock');
+      mockAcquire.mockRejectedValueOnce(executionError([new Error('Connection is closed.')]));
+      await expect(service.tryLock('res')).rejects.toBeInstanceOf(ExecutionError);
+    });
+
+    it('re-throws an ExecutionError carrying no votes (never reached the nodes)', async () => {
+      const { ExecutionError } = jest.requireMock('redlock');
+      await expect(async () => {
+        mockAcquire.mockRejectedValueOnce(new ExecutionError('fail', []));
+        await service.tryLock('res');
+      }).rejects.toBeInstanceOf(ExecutionError);
     });
 
     it('re-throws unexpected errors', async () => {
@@ -176,23 +234,48 @@ describe('LockService', () => {
   });
 
   describe('isLocked()', () => {
-    it('returns false when resource is free (lock acquired and released)', async () => {
-      const result = await service.isLocked('free-resource');
-      expect(result).toBe(false);
-      expect(mockRelease).toHaveBeenCalled();
+    it('returns false when the key does not exist', async () => {
+      mockExists.mockResolvedValueOnce(0);
+      expect(await service.isLocked('free-resource')).toBe(false);
+      expect(mockExists).toHaveBeenCalledWith('lock:free-resource');
     });
 
-    it('returns true when resource is locked (acquire fails with ExecutionError)', async () => {
-      const { ExecutionError } = jest.requireMock('redlock');
-      mockAcquire.mockRejectedValueOnce(new ExecutionError('locked', []));
-      const result = await service.isLocked('busy-resource');
-      expect(result).toBe(true);
+    it('returns true when the key exists', async () => {
+      mockExists.mockResolvedValueOnce(1);
+      expect(await service.isLocked('busy-resource')).toBe(true);
+    });
+
+    // It used to probe by acquiring a real 1ms lock, which could deny a
+    // legitimate acquirer and blocked for the full retry budget.
+    it('is read-only — never acquires or releases a lock', async () => {
+      await service.isLocked('some-resource');
+      expect(mockAcquire).not.toHaveBeenCalled();
+      expect(mockRelease).not.toHaveBeenCalled();
     });
   });
 
   describe('onModuleDestroy()', () => {
-    it('calls redlock.quit()', async () => {
+    // The clients belong to the caller and may be shared with the rest of
+    // their app — shutting down the lock module must not close them.
+    it('leaves the caller’s Redis clients open by default', async () => {
       await service.onModuleDestroy();
+      expect(mockQuit).not.toHaveBeenCalled();
+    });
+
+    it('closes them when closeClientsOnDestroy is enabled', async () => {
+      const owned = (
+        await Test.createTestingModule({
+          providers: [
+            LockService,
+            {
+              provide: LOCK_MODULE_OPTIONS,
+              useValue: { ...mockOptions, closeClientsOnDestroy: true },
+            },
+          ],
+        }).compile()
+      ).get(LockService);
+
+      await owned.onModuleDestroy();
       expect(mockQuit).toHaveBeenCalledTimes(1);
     });
   });
@@ -421,10 +504,7 @@ describe('LockService', () => {
   describe('lock groups (string[] resource)', () => {
     it('acquires all resources in sorted order', async () => {
       await service.withLock(['beta', 'alpha'], async () => 'ok');
-      expect(mockAcquire).toHaveBeenCalledWith(
-        ['lock:alpha', 'lock:beta'],
-        expect.any(Number),
-      );
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:alpha', 'lock:beta'], expect.any(Number));
     });
 
     it('returns callback result for group lock', async () => {
@@ -450,10 +530,7 @@ describe('LockService', () => {
 
     it('sorts resources to prevent deadlock regardless of input order', async () => {
       await service.withLock(['z', 'a', 'm'], async () => null);
-      expect(mockAcquire).toHaveBeenCalledWith(
-        ['lock:a', 'lock:m', 'lock:z'],
-        expect.any(Number),
-      );
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:a', 'lock:m', 'lock:z'], expect.any(Number));
     });
 
     it('emits ACQUIRED with sorted resource label', async () => {
@@ -472,46 +549,112 @@ describe('LockService', () => {
   });
 
   describe('queued locking (queue: true)', () => {
-    it('initializes queue via Lua eval', async () => {
-      await service.withLock('res', async () => 'ok', 1000, false, true);
-      expect(mockEval).toHaveBeenCalledWith(expect.stringContaining('RPUSH'), 1, 'lock:res:queue');
+    // Ordering must come from arrival, not from the caller's deadline —
+    // otherwise a short queueTimeout would jump ahead of an earlier caller.
+    it('takes a monotonic sequence number and joins the queue with it', async () => {
+      mockIncr.mockResolvedValueOnce(7);
+      await service.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+
+      expect(mockIncr).toHaveBeenCalledWith('lock:res:seq');
+      expect(mockZadd).toHaveBeenCalledWith('lock:res:queue', 'NX', 7, expect.any(String));
     });
 
-    it('acquires lock via BRPOP', async () => {
-      await service.withLock('res', async () => 'ok', 1000, false, true);
-      expect(mockBrpop).toHaveBeenCalledWith('lock:res:queue', expect.any(Number));
+    it('carries each waiter’s own deadline inside its queue member', async () => {
+      await service.withLock('res', async () => 'ok', {
+        duration: 1000,
+        queue: true,
+        queueTimeout: 4000,
+      });
+
+      const member: string = mockZadd.mock.calls[0][3];
+      const [deadline, ticket] = member.split('|');
+      expect(Number(deadline)).toBeGreaterThan(Date.now());
+      expect(ticket).toHaveLength(36); // uuid
     });
 
-    it('returns token via RPUSH after callback completes', async () => {
-      await service.withLock('res', async () => 'ok', 1000, false, true);
-      expect(mockRpush).toHaveBeenCalledWith('lock:res:queue', '1');
+    // The whole point of the redesign: the queue only orders callers.
+    // Mutual exclusion must still come from a real, TTL-backed lock.
+    it('acquires the real Redlock lock once it reaches the head of the queue', async () => {
+      await service.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:res'], 1000);
+      expect(mockRelease).toHaveBeenCalled();
+    });
+
+    // A crashed waiter must not block the line behind it.
+    it('evicts expired waiters found at the head, then proceeds', async () => {
+      const expired = `${Date.now() - 5000}|dead-waiter`;
+      mockZrange.mockImplementation(async () => [
+        expired,
+        mockZadd.mock.calls.at(-1)?.[3] as string,
+      ]);
+
+      const result = await service.withLock('res', async () => 'ok', {
+        duration: 1000,
+        queue: true,
+      });
+
+      expect(mockZrem).toHaveBeenCalledWith('lock:res:queue', expired);
+      expect(result).toBe('ok');
+    });
+
+    it('waits while another ticket is at the head, then proceeds', async () => {
+      mockZrange
+        .mockResolvedValueOnce(['someone-else'])
+        .mockResolvedValueOnce(['someone-else'])
+        .mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
+      const result = await service.withLock('res', async () => 'ok', {
+        duration: 1000,
+        queue: true,
+      });
+
+      expect(result).toBe('ok');
+      expect(mockZrange).toHaveBeenCalledTimes(3);
+      expect(mockAcquire).toHaveBeenCalledTimes(1);
     });
 
     it('returns callback result', async () => {
-      const result = await service.withLock('res', async () => 42, 1000, false, true);
+      const result = await service.withLock('res', async () => 42, { duration: 1000, queue: true });
       expect(result).toBe(42);
     });
 
-    it('returns token even when callback throws', async () => {
+    it('leaves the queue even when the callback throws', async () => {
       await expect(
         service.withLock(
           'res',
           async () => {
             throw new Error('boom');
           },
-          1000,
-          false,
-          true,
+          { duration: 1000, queue: true },
         ),
       ).rejects.toThrow('boom');
-      expect(mockRpush).toHaveBeenCalledWith('lock:res:queue', '1');
+      expect(mockZrem).toHaveBeenCalledWith('lock:res:queue', expect.any(String));
     });
 
-    it('throws LockAcquisitionException when BRPOP times out (returns null)', async () => {
-      mockBrpop.mockResolvedValueOnce(null);
+    it('leaves the queue after a successful run', async () => {
+      await service.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+      expect(mockZrem).toHaveBeenCalledWith('lock:res:queue', expect.any(String));
+    });
+
+    it('throws LockAcquisitionException when the queue wait exceeds queueTimeout', async () => {
+      mockZrange.mockResolvedValue(['someone-else-forever']);
       await expect(
-        service.withLock('res', async () => 'ok', 1000, false, true),
+        service.withLock('res', async () => 'ok', {
+          duration: 1000,
+          queue: true,
+          queueTimeout: 60,
+        }),
       ).rejects.toBeInstanceOf(LockAcquisitionException);
+    });
+
+    it('emits FAILED when the queue wait times out', async () => {
+      mockZrange.mockResolvedValue(['someone-else-forever']);
+      const handler = jest.fn();
+      service.on(LockEvent.FAILED, handler);
+      await service
+        .withLock('res', async () => null, { duration: 1000, queue: true, queueTimeout: 60 })
+        .catch(() => null);
+      expect(handler).toHaveBeenCalledWith('res', expect.stringContaining('timeout'));
     });
 
     it('emits ACQUIRED and RELEASED events for queued lock', async () => {
@@ -520,18 +663,43 @@ describe('LockService', () => {
       service.on(LockEvent.ACQUIRED, acquired);
       service.on(LockEvent.RELEASED, released);
 
-      await service.withLock('res', async () => null, 1000, false, true);
+      await service.withLock('res', async () => null, { duration: 1000, queue: true });
 
       expect(acquired).toHaveBeenCalledWith('res', 1000);
       expect(released).toHaveBeenCalledWith('res', expect.any(Number));
     });
 
-    it('emits FAILED event when BRPOP times out', async () => {
-      mockBrpop.mockResolvedValueOnce(null);
-      const handler = jest.fn();
-      service.on(LockEvent.FAILED, handler);
-      await service.withLock('res', async () => null, 1000, false, true).catch(() => null);
-      expect(handler).toHaveBeenCalledWith('res', expect.stringContaining('timeout'));
+    it('re-joins the queue if its ticket was evicted while polling', async () => {
+      mockZrange
+        .mockResolvedValueOnce([])
+        .mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
+      await service.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+      expect(mockZadd).toHaveBeenCalledTimes(2);
+    });
+
+    // Silently ignoring the flag is how the old code hid this case.
+    it('rejects queue: true for lock groups instead of ignoring it', async () => {
+      await expect(service.withLock(['a', 'b'], async () => 'ok', { queue: true })).rejects.toThrow(
+        'not supported for lock groups',
+      );
+    });
+  });
+
+  describe('withLock() — options object vs positional', () => {
+    it('accepts the options object form', async () => {
+      await service.withLock('res', async () => null, { duration: 7000 });
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:res'], 7000);
+    });
+
+    it('still accepts the deprecated positional form', async () => {
+      await service.withLock('res', async () => null, 7000);
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:res'], 7000);
+    });
+
+    it('falls back to the module default duration', async () => {
+      await service.withLock('res', async () => null);
+      expect(mockAcquire).toHaveBeenCalledWith(['lock:res'], 5000);
     });
   });
 });

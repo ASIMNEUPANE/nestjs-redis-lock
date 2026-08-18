@@ -3,4 +3,9 @@ dist/
 coverage/
 *.tgz
 .DS_Store
+# Internal context/handoff docs — not for the public repo.
+# CHANGELOG.md is intentionally NOT ignored: it ships in the npm tarball
+# (package.json "files"), and ignoring it would make CI releases publish
+# without it while local publishes include it.
 CLAUDE.md
+PROJECT_SUMMARY.md

@@ -1,12 +1,16 @@
 import { EventEmitter } from 'events';
 import { Injectable } from '@nestjs/common';
 import type { Lock } from 'redlock';
+import type { LockService } from './lock.service';
+import type { LockCallOptions } from './interfaces/lock-call-options';
+import { setActiveLockService } from './lock.holder';
 
 /**
  * Drop-in replacement for LockService in unit tests.
  * Runs callbacks immediately without acquiring any Redis locks.
  *
- * Swap it in via NestJS DI — no Redis connection needed in tests.
+ * Constructing it also registers it as the active lock service, so methods
+ * decorated with `@Lock()` work in unit tests without a Redis connection.
  *
  * @example
  * // In your test module:
@@ -19,6 +23,12 @@ import type { Lock } from 'redlock';
  */
 @Injectable()
 export class FakeLockService extends EventEmitter {
+  constructor() {
+    super();
+    // Lets @Lock()-decorated methods resolve a service without LockModule.
+    setActiveLockService(this as unknown as LockService);
+  }
+
   /**
    * Runs the callback immediately without acquiring any lock.
    *
@@ -29,7 +39,7 @@ export class FakeLockService extends EventEmitter {
   async withLock<T>(
     _resource: string | string[],
     callback: () => Promise<T>,
-    _duration?: number,
+    _durationOrOptions?: number | LockCallOptions,
     _autoExtend?: boolean,
     _queue?: boolean,
   ): Promise<T> {

@@ -8,14 +8,20 @@ import { LockService } from './lock.service';
 import { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
 
 /**
- * NestJS interceptor that reads @Lock() metadata from the route handler,
- * acquires the specified lock, then releases it after the handler completes.
+ * Legacy interceptor-based locking. Reads @Lock() metadata from the route
+ * handler, acquires the lock, then releases it after the handler completes.
  *
- * Registered automatically by the @Lock() decorator — do not apply manually.
+ * @deprecated `@Lock()` now wraps the method directly and no longer applies
+ * this interceptor. Two reasons it was replaced: interceptors only run in the
+ * request pipeline (so `@Cron` and plain provider methods were never locked),
+ * and the key function here receives `ExecutionContext.getArgs()` — for HTTP
+ * that is `[req, res, next]`, not the handler's parameters. Kept exported for
+ * anyone who wired it manually via `UseInterceptors`.
  *
  * @example
- * // Applied automatically by @Lock():
- * \@Lock({ key: 'my-resource' })
+ * // Only if you are wiring it by hand — @Lock() no longer needs this:
+ * \@UseInterceptors(LockInterceptor)
+ * \@SetMetadata(LOCK_METADATA_KEY, { key: 'my-resource' })
  * async myHandler() { ... }
  */
 @Injectable()
@@ -53,9 +59,11 @@ export class LockInterceptor implements NestInterceptor {
               complete: () => resolve(undefined),
             });
           }),
-        options.duration,
-        options.autoExtend,
-        options.queue,
+        {
+          duration: options.duration,
+          autoExtend: options.autoExtend,
+          queue: options.queue,
+        },
       ),
     ).pipe(
       catchError((err: unknown) => {

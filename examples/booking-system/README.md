@@ -58,7 +58,7 @@ curl http://localhost:3001/bookings
 
 | Pattern | Code location |
 |---|---|
-| Dynamic lock key from request body | `booking.controller.ts` `@Lock({ key: (args) => ... })` |
+| Dynamic lock key from request body | `booking.controller.ts` `@Lock({ key: (dto) => ... })` |
 | Lock groups (multi-resource atomic) | `booking.service.ts` `withLock(string[], ...)` |
 | `onFail: 'throw'` → 409 response | `booking.controller.ts` catch block |
 | `retryCount: 0` for fail-fast | `app.module.ts` `LockModule.register` |

@@ -18,6 +18,12 @@ async generateDailyReport() {
 
 - All instances compete for the same lock at the same time
 - The first to acquire it runs the job
+
+> Requires nestjs-redlock **v1.1.0 or later**. In v1.0.0 `@Lock()` installed a
+> NestJS interceptor, and interceptors do not run for `@Cron` handlers —
+> `@nestjs/schedule` invokes the method directly on the provider, so every
+> instance ran every tick. `@Lock()` now wraps the method itself and works on
+> any method, scheduled jobs included.
 - The rest see `onFail: 'skip'` and silently return without error
 
 ## Run

@@ -15,5 +15,6 @@ export type { LockEventType } from './lock.events';
 
 export type { LockModuleOptions, LockModuleAsyncOptions } from './interfaces/lock-module-options';
 export type { LockDecoratorOptions } from './interfaces/lock-options';
+export type { LockCallOptions } from './interfaces/lock-call-options';
 
 export { LOCK_MODULE_OPTIONS, LOCK_METADATA_KEY } from './constants';
