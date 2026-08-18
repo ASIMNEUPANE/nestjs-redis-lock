@@ -15,6 +15,9 @@ const config: Config = {
   transform: { '^.+\\.ts$': 'ts-jest' },
   transformIgnorePatterns: ['node_modules/(?!(redlock)/)'],
   testEnvironment: 'node',
+  // Jest's node sandbox drops globalThis.crypto on Node 18/20, which
+  // @nestjs/schedule needs to register a cron job. See the setup file.
+  setupFiles: ['<rootDir>/test/setup-globals.ts'],
   testTimeout: 30_000,
   // Concurrency assertions are meaningless if suites race each other on the
   // same Redis keyspace.

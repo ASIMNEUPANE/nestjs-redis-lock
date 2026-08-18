@@ -18,6 +18,9 @@ import { LockModule } from '../../src/lock.module';
  */
 const HOST = process.env.REDIS_HOST ?? '127.0.0.1';
 const PORT = Number(process.env.REDIS_PORT ?? 6379);
+// These tests flush the database they run against. Default to a scratch DB
+// index so a developer pointing at their everyday Redis does not lose it.
+const DB = Number(process.env.REDIS_DB ?? 15);
 
 /** Every tick that actually made it into the critical section. */
 const runs: string[] = [];
@@ -64,7 +67,7 @@ describe('@Lock() on @Cron handlers (integration — real Redis)', () => {
   let client: Redis;
 
   beforeAll(async () => {
-    client = new Redis({ host: HOST, port: PORT, maxRetriesPerRequest: null });
+    client = new Redis({ host: HOST, port: PORT, db: DB, maxRetriesPerRequest: null });
     await client.ping();
   });
 
