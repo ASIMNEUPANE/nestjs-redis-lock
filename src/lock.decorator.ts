@@ -80,6 +80,8 @@ export function Lock(options: LockDecoratorOptions): MethodDecorator {
           duration: options.duration,
           autoExtend: options.autoExtend,
           queue: options.queue,
+          maxConcurrent: options.maxConcurrent,
+          mode: options.mode,
         });
       } catch (err) {
         if (options.onFail === 'skip' && err instanceof LockAcquisitionException) {

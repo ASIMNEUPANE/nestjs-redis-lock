@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FakeLockService } from '../src/testing';
+import { LockAcquisitionException } from '../src/exceptions/lock-acquisition.exception';
 
 describe('FakeLockService', () => {
   let fake: FakeLockService;
@@ -36,17 +37,72 @@ describe('FakeLockService', () => {
       const result = await fake.withLock('res', async () => 42, 10000, true, true);
       expect(result).toBe(42);
     });
+
+    it('passes an AbortSignal and an increasing fencing token to the callback', async () => {
+      const first = await fake.withLock('res', async (signal, token) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal.aborted).toBe(false);
+        return token;
+      });
+      const second = await fake.withLock('res', async (_signal, token) => token);
+
+      expect(second).toBe(first + 1);
+    });
+
+    it('throws LockAcquisitionException when the resource is simulateLocked', async () => {
+      fake.simulateLocked('res');
+      await expect(fake.withLock('res', async () => 'value')).rejects.toBeInstanceOf(
+        LockAcquisitionException,
+      );
+    });
+
+    it('throws when any member of a lock group is simulateLocked', async () => {
+      fake.simulateLocked('b');
+      await expect(fake.withLock(['a', 'b'], async () => 'group')).rejects.toBeInstanceOf(
+        LockAcquisitionException,
+      );
+    });
+
+    it('succeeds again after simulateUnlocked', async () => {
+      fake.simulateLocked('res');
+      fake.simulateUnlocked('res');
+      const result = await fake.withLock('res', async () => 'value');
+      expect(result).toBe('value');
+    });
+
+    it('succeeds again after simulateAllUnlocked', async () => {
+      fake.simulateLocked('a');
+      fake.simulateLocked('b');
+      fake.simulateAllUnlocked();
+      const result = await fake.withLock('a', async () => 'value');
+      expect(result).toBe('value');
+    });
   });
 
   describe('tryLock()', () => {
-    it('returns null without acquiring any lock', async () => {
+    it('returns a lock without needing Redis', async () => {
       const lock = await fake.tryLock('res');
-      expect(lock).toBeNull();
+      expect(lock).not.toBeNull();
     });
 
-    it('returns null regardless of duration', async () => {
+    it('returns null once the resource is simulateLocked', async () => {
+      fake.simulateLocked('res');
       const lock = await fake.tryLock('res', 9000);
       expect(lock).toBeNull();
+    });
+  });
+
+  describe('tryLockWithToken()', () => {
+    it('returns a lock and an increasing fencing token', async () => {
+      const first = await fake.tryLockWithToken('res');
+      const second = await fake.tryLockWithToken('res');
+      expect(first).not.toBeNull();
+      expect(second!.fencingToken).toBe(first!.fencingToken + 1);
+    });
+
+    it('returns null once the resource is simulateLocked', async () => {
+      fake.simulateLocked('res');
+      expect(await fake.tryLockWithToken('res')).toBeNull();
     });
   });
 
@@ -59,9 +115,41 @@ describe('FakeLockService', () => {
   });
 
   describe('isLocked()', () => {
-    it('always returns false', async () => {
+    it('returns false by default', async () => {
       const locked = await fake.isLocked('res');
       expect(locked).toBe(false);
+    });
+
+    it('reflects simulateLocked/simulateUnlocked', async () => {
+      fake.simulateLocked('res');
+      expect(await fake.isLocked('res')).toBe(true);
+      fake.simulateUnlocked('res');
+      expect(await fake.isLocked('res')).toBe(false);
+    });
+  });
+
+  describe('call recording', () => {
+    it('records withLock/tryLock/tryLockWithToken calls in order', async () => {
+      await fake.withLock('a', async () => null);
+      await fake.tryLock('b');
+      await fake.tryLockWithToken('c');
+
+      const calls = fake.getCalls();
+      expect(calls.map((c) => [c.method, c.resource])).toEqual([
+        ['withLock', 'a'],
+        ['tryLock', 'b'],
+        ['tryLockWithToken', 'c'],
+      ]);
+    });
+
+    it('clearCalls empties the log without touching simulated locks', async () => {
+      await fake.withLock('a', async () => null);
+      fake.simulateLocked('locked-res');
+
+      fake.clearCalls();
+
+      expect(fake.getCalls()).toHaveLength(0);
+      expect(await fake.isLocked('locked-res')).toBe(true);
     });
   });
 

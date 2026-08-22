@@ -24,6 +24,9 @@ curl -X POST http://localhost:3000/counter/increment
 
 # Read current value
 curl http://localhost:3000/counter/value
+
+# Increment via the programmatic API, using autoExtend + AbortSignal + fencing token
+curl -X POST http://localhost:3000/counter/increment-fenced
 ```
 
 ## What this shows
@@ -33,3 +36,7 @@ curl http://localhost:3000/counter/value
 - Lock TTL override (`duration: 5000`)
 - `LockService` injected into a service for programmatic locking
 - `@Lock()` on a controller method for declarative locking
+- `withLock()`'s `(signal, fencingToken)` callback — `CounterService.incrementWithFencing()`
+  uses `autoExtend: true` and checks `signal.aborted` before writing, and rejects the write
+  if `fencingToken` isn't newer than the last one it applied. `@Lock()` doesn't expose either
+  argument to a decorated method, so this needs the programmatic API.

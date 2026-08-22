@@ -11,10 +11,10 @@
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
-    "@nestjs/schedule": "^4.0.0",
+    "@nestjs/schedule": "^6.0.0",
     "cron": "^3.0.0",
     "ioredis": "^5.4.0",
-    "nestjs-redlock": "^0.3.0",
+    "nestjs-redlock": "^1.2.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.0"
   },

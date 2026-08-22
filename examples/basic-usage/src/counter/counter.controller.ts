@@ -21,4 +21,13 @@ export class CounterController {
   getValue(): { value: number } {
     return { value: this.counterService.getValue() };
   }
+
+  /**
+   * Uses LockService.withLock() directly, so the callback can receive the
+   * AbortSignal + fencing token pair the @Lock() decorator does not expose.
+   */
+  @Post('increment-fenced')
+  async incrementFenced(): Promise<{ value: number; fencingToken: number }> {
+    return this.counterService.incrementWithFencing();
+  }
 }

@@ -3,6 +3,78 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-08-22
+
+New concurrency primitives, all built on the shared acquire/extend/release core
+introduced in 1.1.0's queue rewrite, plus a fencing token on every acquisition.
+Every new primitive is backed by concurrency tests against real Redis, not
+just mocks — the 1.1.0 postmortem's lesson (`queue: true` passed every unit
+test while providing no exclusion) carries directly into how these were built.
+
+### Added
+
+- **Semaphore (`maxConcurrent: N`)** — allow up to N concurrent holders
+  instead of one. A FIFO ticket queue decides who's in the first N; a
+  separate Lua-scripted Redis set (`{key}:sem`) atomically admits at most N
+  holders, each its own uniquely-named member, so N concurrent releases
+  (`ZREM <own member>`) can never race or double-decrement anything. A
+  fairness primitive on its own is never a substitute for real exclusion —
+  the queue orders, the Lua script excludes.
+
+- **Read-write locks (`mode: 'read' | 'write'`)** — any number of concurrent
+  readers, or one exclusive writer, never both. Three pieces of Redis state
+  coordinated by Lua: a readers ZSET, a single writer key
+  (compare-and-swapped on extend/release), and a `writer-waiting` marker a
+  writer candidate sets while it polls, so a steady stream of readers can't
+  starve a waiting writer indefinitely. Rare in the Node ecosystem.
+
+- **Fencing tokens** — every acquisition (mutex, group, queue, semaphore, or
+  read-write) now hands back a monotonically increasing integer via the
+  callback's second argument or `tryLockWithToken()`. This is the standard
+  answer to Redlock's best-known theoretical weakness (Kleppmann, 2016): a
+  lock is time-based, so a paused or GC'd holder can act again after its
+  lock expired and a new holder acquired it. The package cannot force a
+  downstream system to honor the token — see the README's Fencing tokens
+  section for the trust boundary.
+
+- **`AbortSignal` on lock loss** — the callback's first argument is an
+  `AbortSignal` that fires when `autoExtend` fails to renew the lock
+  mid-callback. Only meaningful with `autoExtend: true`; without it the
+  signal is provided but never fires, since nothing periodically checks the
+  lock's health.
+
+- **Observability additions** — `LockEvent.EXTEND_FAILED`, `RELEASE_FAILED`,
+  and `QUEUED` (fired from the plain queue, the semaphore, and the read-write
+  lock's writer queue); typed `on()`/`once()`/`emit()` overloads keyed by
+  event name, so a typo'd event or mismatched payload is now a compile error;
+  and `FakeLockService` gained `simulateLocked()` / `simulateUnlocked()` /
+  `simulateAllUnlocked()` plus `getCalls()` / `clearCalls()` call recording —
+  it previously could only ever succeed, which made it unable to exercise an
+  `onFail` branch in a test.
+
+- **OpenTelemetry tracing (`nestjs-redlock/tracing`)** — `attachOtelTracing(lockService)`
+  wires `LockService`'s events into one span per acquisition, covering queue
+  wait time through release, with `EXTENDED`/`EXTEND_FAILED`/`RELEASE_FAILED`/
+  `QUEUED` mirrored as span events. `@opentelemetry/api` is an optional peer
+  dependency, isolated to its own entry point so importing `nestjs-redlock`
+  itself never requires it to be installed. Event payloads carry a resource
+  label but no per-call acquisition id, so concurrent holders of the *same*
+  label are paired FIFO — exact for one holder at a time, a documented
+  best-effort approximation under concurrent sharing.
+
+### Changed
+
+- `withLock()`'s callback signature is now `(signal, fencingToken) => Promise<T>`.
+  Additive, not breaking — existing zero-arg and one-arg callbacks keep
+  compiling and running unchanged.
+- The "Locks are time-based, not fenced" operational note has been rewritten:
+  fencing tokens are no longer something you have to build yourself.
+- All three example apps now use `withLock()`'s `(signal, fencingToken)`
+  callback, `maxConcurrent`, and `mode` — `basic-usage` gains a fenced,
+  auto-extended counter increment; `booking-system` gains a read-write
+  locked seat map and a semaphore-gated payment confirmation; `cron-dedup`'s
+  README notes why `@Lock()` doesn't expose these to a decorated method.
+
 ## [1.1.0] — 2026-08-18
 
 A correctness release. An audit of v1.0.0 found three advertised features that

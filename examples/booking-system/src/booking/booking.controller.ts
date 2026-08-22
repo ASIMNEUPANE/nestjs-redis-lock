@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param } from '@nestjs/common';
 import { Lock, LockAcquisitionException } from 'nestjs-redlock';
 import { BookingService, BookingResult } from './booking.service';
 
@@ -60,5 +60,34 @@ export class BookingController {
   @Get()
   listBookings(): BookingResult[] {
     return this.bookingService.listBookings();
+  }
+
+  /**
+   * Shared `mode: 'read'` — any number of concurrent viewers, blocked only
+   * while a `bookMultipleSeats` write is exclusively held.
+   */
+  @Get(':locationId/availability')
+  async getAvailability(
+    @Param('locationId') locationId: string,
+  ): Promise<BookingResult[]> {
+    return this.bookingService.getAvailability(locationId);
+  }
+
+  /**
+   * `maxConcurrent: 3` — up to 3 concurrent gateway calls per location
+   * instead of serializing every payment through a single lock.
+   */
+  @Post('payment/confirm')
+  async confirmPayment(
+    @Body() dto: { locationId: string; bookingId: string },
+  ): Promise<{ confirmed: true } | { error: string }> {
+    try {
+      return await this.bookingService.confirmPayment(dto.locationId, dto.bookingId);
+    } catch (err) {
+      if (err instanceof LockAcquisitionException) {
+        return { error: 'Payment gateway is at capacity. Try again shortly.' };
+      }
+      throw err;
+    }
   }
 }

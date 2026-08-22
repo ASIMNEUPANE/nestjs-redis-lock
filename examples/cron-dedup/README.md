@@ -64,3 +64,12 @@ lock TTL > max job duration + safety margin
 ```
 
 If your job takes up to 8 seconds and fires every 10 seconds, set `duration: 12_000`. If a previous job's lock is still held when the next tick fires, the next tick skips — which is the correct behavior.
+
+## What this example doesn't show
+
+`@Lock()` doesn't expose the programmatic API's `AbortSignal`/fencing-token callback
+arguments or `maxConcurrent`/`mode` options — a decorated method only ever gets `onFail` and
+a static or dynamic `key`. If a scheduled job needs those (e.g. to guard a write against a
+paused holder resuming after a newer run already committed), call `LockService.withLock()`
+directly inside the method body instead of relying on the decorator. See the
+`basic-usage` example's `increment-fenced` endpoint for that pattern.

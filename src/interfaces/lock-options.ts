@@ -43,10 +43,25 @@ export interface LockDecoratorOptions {
   autoExtend?: boolean;
 
   /**
-   * Enable FIFO queued locking. Callers block in arrival order (Redis BRPOP)
-   * instead of competing with random retry jitter — eliminates thundering herd.
+   * Enable FIFO queued locking. Callers wait in arrival order instead of
+   * competing with random retry jitter — eliminates thundering herd.
    * Uses the first Redis client in `LockModuleOptions.clients`.
    * @default false
    */
   queue?: boolean;
+
+  /**
+   * Allow up to `N` concurrent holders instead of one. Mutually exclusive
+   * with `queue` and with array (lock group) keys.
+   * @default undefined (plain mutex — at most 1 holder)
+   */
+  maxConcurrent?: number;
+
+  /**
+   * Read-write locking: any number of concurrent `'read'` holders, or one
+   * exclusive `'write'` holder. Mutually exclusive with `queue`,
+   * `maxConcurrent`, and array (lock group) keys.
+   * @default undefined (plain mutex)
+   */
+  mode?: 'read' | 'write';
 }

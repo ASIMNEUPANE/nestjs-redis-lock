@@ -44,4 +44,25 @@ export interface LockCallOptions {
    * @default duration * 3
    */
   queueTimeout?: number;
+
+  /**
+   * Allow up to `N` concurrent holders instead of one. Callers beyond the
+   * Nth queue (FIFO, same fairness guarantee as `queue: true`) until a slot
+   * frees up. Mutually exclusive with `queue` and with array (lock group)
+   * resources.
+   *
+   * @default undefined (plain mutex — at most 1 holder)
+   */
+  maxConcurrent?: number;
+
+  /**
+   * Read-write locking: any number of concurrent `'read'` holders, or one
+   * exclusive `'write'` holder — never both at once. Write candidates queue
+   * FIFO and block new readers while they wait, so a busy resource can't
+   * starve a writer indefinitely. Mutually exclusive with `queue`,
+   * `maxConcurrent`, and array (lock group) resources.
+   *
+   * @default undefined (plain mutex — at most 1 holder, no read/write distinction)
+   */
+  mode?: 'read' | 'write';
 }

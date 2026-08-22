@@ -142,6 +142,89 @@ describe('LockService (integration — real Redis)', () => {
     });
   });
 
+  describe('semaphore (maxConcurrent: N)', () => {
+    it('admits exactly N concurrent holders, not 1 and not all', async () => {
+      const N = 5;
+      // contend()'s counter is *deliberately* unsafe under concurrent access
+      // (that's what makes it a mutual-exclusion proof for maxConcurrent: 1).
+      // A semaphore's whole point is that N holders genuinely race each
+      // other, so the counter would legitimately undercount here — `order`
+      // is a safe, append-only record of who got admitted, which is what
+      // this test actually needs to check.
+      const { maxConcurrent, order } = await contend(N + 10, (_i, body) =>
+        service.withLock('pool', body, { duration: 5000, maxConcurrent: N, queueTimeout: 25_000 }),
+      );
+
+      expect(maxConcurrent).toBe(N);
+      expect(order).toHaveLength(N + 10);
+    });
+
+    it('blocks the (N+1)th caller until a slot frees', async () => {
+      const N = 3;
+      const releases: Array<() => void> = [];
+      const holds = Array.from(
+        { length: N },
+        () =>
+          new Promise<void>((resolve) => {
+            releases.push(resolve);
+          }),
+      );
+
+      const started: number[] = [];
+      const holders = holds.map((hold, i) =>
+        service.withLock(
+          'pool-block',
+          async () => {
+            started.push(i);
+            await hold;
+          },
+          { duration: 10_000, maxConcurrent: N },
+        ),
+      );
+
+      // Give the N holders time to actually acquire before the extra caller arrives.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(started).toHaveLength(N);
+
+      let extraStarted = false;
+      const extra = service.withLock(
+        'pool-block',
+        async () => {
+          extraStarted = true;
+        },
+        { duration: 5000, maxConcurrent: N, queueTimeout: 20_000 },
+      );
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(extraStarted).toBe(false);
+
+      releases[0]();
+      await extra;
+      expect(extraStarted).toBe(true);
+
+      releases.slice(1).forEach((release) => release());
+      await Promise.all(holders);
+    });
+
+    it('leaves no queue or owner entries behind after completion', async () => {
+      await service.withLock('pool-tidy', async () => 'ok', { duration: 2000, maxConcurrent: 2 });
+      expect(await client.zcard('itest:pool-tidy:sem:queue')).toBe(0);
+      expect(await client.zcard('itest:pool-tidy:sem')).toBe(0);
+    });
+
+    it('rejects maxConcurrent combined with a lock group', async () => {
+      await expect(
+        service.withLock(['g1', 'g2'], async () => null, { maxConcurrent: 2 }),
+      ).rejects.toThrow(/lock groups/);
+    });
+
+    it('rejects maxConcurrent combined with queue', async () => {
+      await expect(
+        service.withLock('res', async () => null, { maxConcurrent: 2, queue: true }),
+      ).rejects.toThrow(/cannot be combined/);
+    });
+  });
+
   describe('queue fairness', () => {
     it('serves callers in arrival order', async () => {
       const order: number[] = [];
@@ -303,6 +386,247 @@ describe('LockService (integration — real Redis)', () => {
 
       await deadModule.close().catch(() => undefined);
       deadClient.disconnect();
+    });
+  });
+
+  describe('read-write locks (mode: "read" | "write")', () => {
+    it('lets concurrent readers genuinely overlap', async () => {
+      const intervals: Array<{ start: number; end: number }> = [];
+      const read = () =>
+        service.withLock(
+          'doc',
+          async () => {
+            const start = Date.now();
+            await new Promise((r) => setTimeout(r, 200));
+            intervals.push({ start, end: Date.now() });
+          },
+          { duration: 5000, mode: 'read' },
+        );
+
+      await Promise.all([read(), read(), read()]);
+
+      expect(intervals).toHaveLength(3);
+      // If they were serialized, the 3rd reader's start would be >= the
+      // 1st's end (~400ms later). Overlap means it starts near the others.
+      const starts = intervals.map((i) => i.start).sort((a, b) => a - b);
+      expect(starts[2] - starts[0]).toBeLessThan(100);
+    });
+
+    it('excludes all readers while a writer holds the lock', async () => {
+      const events: string[] = [];
+
+      let releaseWriter!: () => void;
+      const writerHeld = new Promise<void>((r) => (releaseWriter = r));
+      const writer = service.withLock(
+        'doc',
+        async () => {
+          events.push('writer-start');
+          await writerHeld;
+          events.push('writer-end');
+        },
+        { duration: 10_000, mode: 'write' },
+      );
+
+      // Give the writer time to actually acquire before readers arrive.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(events).toEqual(['writer-start']);
+
+      const reader = service.withLock(
+        'doc',
+        async () => {
+          events.push('reader-start');
+        },
+        { duration: 5000, mode: 'read', queueTimeout: 20_000 },
+      );
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(events).toEqual(['writer-start']); // reader still blocked
+
+      releaseWriter();
+      await Promise.all([writer, reader]);
+
+      expect(events).toEqual(['writer-start', 'writer-end', 'reader-start']);
+    });
+
+    it('excludes a writer while any reader holds the lock', async () => {
+      const events: string[] = [];
+
+      let releaseReader!: () => void;
+      const readerHeld = new Promise<void>((r) => (releaseReader = r));
+      const reader = service.withLock(
+        'doc2',
+        async () => {
+          events.push('reader-start');
+          await readerHeld;
+          events.push('reader-end');
+        },
+        { duration: 10_000, mode: 'read' },
+      );
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(events).toEqual(['reader-start']);
+
+      const writer = service.withLock(
+        'doc2',
+        async () => {
+          events.push('writer-start');
+        },
+        { duration: 5000, mode: 'write', queueTimeout: 20_000 },
+      );
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(events).toEqual(['reader-start']); // writer still blocked
+
+      releaseReader();
+      await Promise.all([reader, writer]);
+
+      expect(events).toEqual(['reader-start', 'reader-end', 'writer-start']);
+    });
+
+    it('does not starve a waiting writer under a steady stream of readers', async () => {
+      const events: string[] = [];
+      let stop = false;
+
+      // A continuous stream of short-lived readers arriving faster than the
+      // writer-waiting marker's TTL — without the starvation guard, this
+      // stream never lets the read count hit zero at the same instant a
+      // writer checks, so the writer could wait indefinitely.
+      const readerLoop = (async () => {
+        while (!stop) {
+          await service
+            .withLock(
+              'doc3',
+              async () => {
+                await new Promise((r) => setTimeout(r, 20));
+              },
+              { duration: 2000, mode: 'read' },
+            )
+            .catch(() => undefined);
+        }
+      })();
+
+      // Let a few readers get going first.
+      await new Promise((r) => setTimeout(r, 100));
+
+      const writer = service.withLock(
+        'doc3',
+        async () => {
+          events.push('writer-acquired');
+        },
+        { duration: 2000, mode: 'write', queueTimeout: 5_000 },
+      );
+
+      await writer;
+      stop = true;
+      await readerLoop;
+
+      expect(events).toEqual(['writer-acquired']);
+    });
+
+    it('releases all read-write Redis state after completion', async () => {
+      await service.withLock('doc-tidy', async () => 'ok', { duration: 2000, mode: 'read' });
+      await service.withLock('doc-tidy', async () => 'ok', { duration: 2000, mode: 'write' });
+
+      expect(await client.zcard('itest:doc-tidy:rw:readers')).toBe(0);
+      expect(await client.exists('itest:doc-tidy:rw:writer')).toBe(0);
+      expect(await client.exists('itest:doc-tidy:rw:writer-waiting')).toBe(0);
+      expect(await client.zcard('itest:doc-tidy:rw:writers:queue')).toBe(0);
+    });
+
+    it('rejects mode combined with queue, maxConcurrent, or array resources', async () => {
+      await expect(
+        service.withLock('res', async () => null, { mode: 'read', queue: true }),
+      ).rejects.toThrow(/cannot be combined/);
+      await expect(
+        service.withLock('res', async () => null, { mode: 'write', maxConcurrent: 2 }),
+      ).rejects.toThrow(/cannot be combined/);
+      await expect(
+        service.withLock(['a', 'b'], async () => null, { mode: 'read' }),
+      ).rejects.toThrow(/lock groups/);
+    });
+  });
+
+  describe('fencing tokens', () => {
+    it('issues a strictly increasing token on each sequential acquisition', async () => {
+      const tokens: number[] = [];
+      for (let i = 0; i < 5; i++) {
+        await service.withLock('sku-42', async (_signal, token) => {
+          tokens.push(token);
+        });
+      }
+
+      for (let i = 1; i < tokens.length; i++) {
+        expect(tokens[i]).toBeGreaterThan(tokens[i - 1]);
+      }
+    });
+
+    it('shares one fence counter across a lock group', async () => {
+      const first = await service.withLock(['seat:g1', 'seat:g2'], async (_s, token) => token);
+      const second = await service.withLock(['seat:g1', 'seat:g2'], async (_s, token) => token);
+      expect(second).toBeGreaterThan(first);
+    });
+
+    it('tryLockWithToken returns an increasing token alongside the lock', async () => {
+      const first = await service.tryLockWithToken('sku-99', 2000);
+      await first!.lock.release();
+      const second = await service.tryLockWithToken('sku-99', 2000);
+      await second!.lock.release();
+
+      expect(second!.fencingToken).toBeGreaterThan(first!.fencingToken);
+    });
+  });
+
+  describe('AbortSignal on lock loss', () => {
+    it('provides a signal that stays unaborted through a healthy autoExtend hold', async () => {
+      let observed: AbortSignal | undefined;
+      await service.withLock(
+        'healthy-hold',
+        async (signal) => {
+          observed = signal;
+          await new Promise((r) => setTimeout(r, 300));
+        },
+        { duration: 200, autoExtend: true },
+      );
+      expect(observed?.aborted).toBe(false);
+    });
+
+    it('aborts the signal when auto-extend can no longer reach Redis', async () => {
+      // A dedicated client so disconnecting it doesn't break other tests
+      // sharing the suite's client.
+      const extendClient = new Redis({ host: HOST, port: PORT, db: DB, maxRetriesPerRequest: 1 });
+      await extendClient.ping();
+
+      const extendModule = await Test.createTestingModule({
+        providers: [
+          LockService,
+          {
+            provide: LOCK_MODULE_OPTIONS,
+            useValue: {
+              clients: [extendClient],
+              duration: 200,
+              retryCount: 0,
+              keyPrefix: 'itest',
+            },
+          },
+        ],
+      }).compile();
+      const extendService = extendModule.get(LockService);
+
+      let sawAbort = false;
+      await extendService.withLock(
+        'extend-loss',
+        async (signal) => {
+          // Cut the connection mid-hold so the next auto-extend attempt fails.
+          extendClient.disconnect();
+          // duration=200 → extend interval fires at ~100ms; give it two.
+          await new Promise((r) => setTimeout(r, 350));
+          sawAbort = signal.aborted;
+        },
+        { duration: 200, autoExtend: true },
+      );
+
+      expect(sawAbort).toBe(true);
+      await extendModule.close().catch(() => undefined);
     });
   });
 });

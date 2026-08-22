@@ -52,6 +52,14 @@ curl -X POST http://localhost:3001/bookings/multi \
 
 # List all bookings
 curl http://localhost:3001/bookings
+
+# Read the seat map — any number of concurrent viewers allowed (mode: 'read')
+curl http://localhost:3001/bookings/LOC-001/availability
+
+# Confirm payment — up to 3 concurrent gateway calls per location (maxConcurrent: 3)
+curl -X POST http://localhost:3001/bookings/payment/confirm \
+  -H "Content-Type: application/json" \
+  -d '{"locationId":"LOC-001","bookingId":"bk-1"}'
 ```
 
 ## Key patterns shown
@@ -62,3 +70,15 @@ curl http://localhost:3001/bookings
 | Lock groups (multi-resource atomic) | `booking.service.ts` `withLock(string[], ...)` |
 | `onFail: 'throw'` → 409 response | `booking.controller.ts` catch block |
 | `retryCount: 0` for fail-fast | `app.module.ts` `LockModule.register` |
+| Fencing token guards a repository write | `seat.repository.ts` `bookSeat()` rejects a stale token |
+| Read-write lock (`mode: 'read'` / `'write'`) | `booking.service.ts` `getAvailability()` / `bookMultipleSeats()` on `seatmap:{locationId}` |
+| Semaphore (`maxConcurrent: 3`) | `booking.service.ts` `confirmPayment()` on `payment-gateway:{locationId}` |
+
+### Why a read-write lock here
+
+`bookMultipleSeats` already locks the individual seats it's writing (a lock group), but a
+concurrent `getAvailability` read isn't part of that group — without something coordinating
+the two, a viewer could see some seats already booked and others not yet, mid-write. Wrapping
+the bulk write in `mode: 'write'` on `seatmap:{locationId}` and the read in `mode: 'read'` on
+the same key closes that gap: any number of reads run concurrently, but never alongside a
+write.

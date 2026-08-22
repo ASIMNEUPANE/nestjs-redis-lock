@@ -11,10 +11,11 @@ export { LockAcquisitionException } from './exceptions/lock-acquisition.exceptio
 export { LockExtendException } from './exceptions/lock-extend.exception';
 
 export { LockEvent } from './lock.events';
-export type { LockEventType } from './lock.events';
+export type { LockEventType, LockEventPayloads } from './lock.events';
 
 export type { LockModuleOptions, LockModuleAsyncOptions } from './interfaces/lock-module-options';
 export type { LockDecoratorOptions } from './interfaces/lock-options';
 export type { LockCallOptions } from './interfaces/lock-call-options';
+export type { FencingToken } from './interfaces/fencing-token';
 
 export { LOCK_MODULE_OPTIONS, LOCK_METADATA_KEY } from './constants';

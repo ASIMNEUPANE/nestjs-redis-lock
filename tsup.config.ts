@@ -1,12 +1,20 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/testing.ts'],
+  entry: ['src/index.ts', 'src/testing.ts', 'src/lock.tracing.ts'],
   format: ['cjs', 'esm'],
   dts: true,
   splitting: false,
   sourcemap: true,
   clean: true,
   minify: false,
-  external: ['@nestjs/common', '@nestjs/core', '@nestjs/terminus', 'ioredis', 'reflect-metadata', 'rxjs'],
+  external: [
+    '@nestjs/common',
+    '@nestjs/core',
+    '@nestjs/terminus',
+    '@opentelemetry/api',
+    'ioredis',
+    'reflect-metadata',
+    'rxjs',
+  ],
 });

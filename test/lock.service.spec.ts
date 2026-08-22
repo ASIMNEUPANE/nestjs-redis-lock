@@ -40,6 +40,18 @@ jest.mock('redlock', () => {
 });
 
 /**
+ * Drains the microtask queue enough times for a promise chain of a few
+ * `.then()`/`await` hops (acquire → handle adapter → fencing token INCR) to
+ * fully settle, without hard-coding an exact tick count that would break
+ * again the next time an intermediate `await` is added or removed.
+ */
+async function flushMicrotasks(times = 10): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    await Promise.resolve();
+  }
+}
+
+/**
  * Builds a redlock ExecutionError whose final attempt voted against for the
  * given reasons — the shape LockService inspects to tell contention apart
  * from an unreachable Redis.
@@ -63,8 +75,17 @@ describe('LockService', () => {
   const mockZadd = jest.fn().mockResolvedValue(1);
   const mockZrem = jest.fn().mockResolvedValue(1);
   const mockZrange = jest.fn();
+  const mockZrank = jest.fn().mockResolvedValue(0);
   const mockIncr = jest.fn().mockResolvedValue(1);
   const mockExists = jest.fn().mockResolvedValue(0);
+  const mockSemaphoreAcquire = jest.fn().mockResolvedValue(1);
+  const mockSemaphoreExtend = jest.fn().mockResolvedValue(1);
+  const mockRwAcquireRead = jest.fn().mockResolvedValue(1);
+  const mockRwAcquireWrite = jest.fn().mockResolvedValue(1);
+  const mockRwExtendWrite = jest.fn().mockResolvedValue(1);
+  const mockRwReleaseWrite = jest.fn().mockResolvedValue(1);
+  const mockSet = jest.fn().mockResolvedValue('OK');
+  const mockDel = jest.fn().mockResolvedValue(1);
 
   const mockOptions = {
     clients: [
@@ -72,8 +93,17 @@ describe('LockService', () => {
         zadd: mockZadd,
         zrem: mockZrem,
         zrange: mockZrange,
+        zrank: mockZrank,
         incr: mockIncr,
         exists: mockExists,
+        semaphoreAcquire: mockSemaphoreAcquire,
+        semaphoreExtend: mockSemaphoreExtend,
+        rwAcquireRead: mockRwAcquireRead,
+        rwAcquireWrite: mockRwAcquireWrite,
+        rwExtendWrite: mockRwExtendWrite,
+        rwReleaseWrite: mockRwReleaseWrite,
+        set: mockSet,
+        del: mockDel,
       },
     ],
     duration: 5000,
@@ -94,8 +124,17 @@ describe('LockService', () => {
     mockRelease.mockResolvedValue(undefined);
     mockZadd.mockResolvedValue(1);
     mockZrem.mockResolvedValue(1);
+    mockZrank.mockResolvedValue(0);
     mockIncr.mockResolvedValue(1);
     mockExists.mockResolvedValue(0);
+    mockSemaphoreAcquire.mockResolvedValue(1);
+    mockSemaphoreExtend.mockResolvedValue(1);
+    mockRwAcquireRead.mockResolvedValue(1);
+    mockRwAcquireWrite.mockResolvedValue(1);
+    mockRwExtendWrite.mockResolvedValue(1);
+    mockRwReleaseWrite.mockResolvedValue(1);
+    mockSet.mockResolvedValue('OK');
+    mockDel.mockResolvedValue(1);
     beHeadOfQueue();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -233,6 +272,71 @@ describe('LockService', () => {
     });
   });
 
+  describe('fencing tokens', () => {
+    it('passes an increasing fencing token to the callback on each acquisition', async () => {
+      mockIncr.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
+
+      const first = await service.withLock('sku-42', async (_signal, token) => token);
+      const second = await service.withLock('sku-42', async (_signal, token) => token);
+
+      expect(first).toBe(7);
+      expect(second).toBe(8);
+      expect(mockIncr).toHaveBeenCalledWith('lock:sku-42:fence');
+    });
+
+    it('tryLockWithToken returns the lock plus a fencing token', async () => {
+      mockIncr.mockResolvedValueOnce(3);
+      const result = await service.tryLockWithToken('sku-42', 5000);
+      expect(result).toEqual({ lock: mockLock, fencingToken: 3 });
+    });
+
+    it('tryLockWithToken returns null on contention without issuing a token', async () => {
+      mockAcquire.mockRejectedValueOnce(executionError([new Error('resource is locked')]));
+      const result = await service.tryLockWithToken('sku-42');
+      expect(result).toBeNull();
+      expect(mockIncr).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('AbortSignal', () => {
+    it('provides a signal that is not aborted for a healthy lock', async () => {
+      let seen: AbortSignal | undefined;
+      await service.withLock('res', async (signal) => {
+        seen = signal;
+      });
+      expect(seen).toBeInstanceOf(AbortSignal);
+      expect(seen!.aborted).toBe(false);
+    });
+
+    it('aborts the signal when auto-extend fails', async () => {
+      jest.useFakeTimers();
+      mockExtend.mockRejectedValue(new Error('lock expired'));
+
+      let signal!: AbortSignal;
+      let resolveCallback!: (v: string) => void;
+      const callbackPromise = service.withLock(
+        'expiry-job',
+        (s) =>
+          new Promise<string>((resolve) => {
+            signal = s;
+            resolveCallback = resolve;
+          }),
+        200,
+        true,
+      );
+
+      await flushMicrotasks();
+      jest.advanceTimersByTime(101);
+      await flushMicrotasks();
+
+      expect(signal.aborted).toBe(true);
+
+      resolveCallback('done');
+      await callbackPromise;
+      jest.useRealTimers();
+    });
+  });
+
   describe('isLocked()', () => {
     it('returns false when the key does not exist', async () => {
       mockExists.mockResolvedValueOnce(0);
@@ -324,8 +428,9 @@ describe('LockService', () => {
         true,
       );
 
-      // Let acquire resolve so the interval is registered
-      await Promise.resolve();
+      // Let acquire resolve, the interval register, and the callback (gated
+      // on the fencing token INCR) actually start running.
+      await flushMicrotasks();
 
       // Interval fires at ttl/2 = 500ms; extend is called synchronously
       jest.advanceTimersByTime(501);
@@ -398,8 +503,9 @@ describe('LockService', () => {
         true,
       );
 
-      // Let acquire complete and interval be registered
-      await Promise.resolve();
+      // Let acquire complete, the interval register, and the callback (gated
+      // on the fencing token INCR) actually start running.
+      await flushMicrotasks();
 
       // First extend fires at 100ms — synchronously calls mockExtend
       jest.advanceTimersByTime(101);
@@ -423,7 +529,20 @@ describe('LockService', () => {
   describe('edge cases', () => {
     it('handles onModuleDestroy when redlock.quit() throws', async () => {
       mockQuit.mockRejectedValueOnce(new Error('connection reset'));
-      await expect(service.onModuleDestroy()).resolves.toBeUndefined();
+      const owned = (
+        await Test.createTestingModule({
+          providers: [
+            LockService,
+            {
+              provide: LOCK_MODULE_OPTIONS,
+              useValue: { ...mockOptions, closeClientsOnDestroy: true },
+            },
+          ],
+        }).compile()
+      ).get(LockService);
+
+      await expect(owned.onModuleDestroy()).resolves.toBeUndefined();
+      expect(mockQuit).toHaveBeenCalledTimes(1);
     });
 
     it('concurrent withLock calls all acquire independently', async () => {
@@ -498,6 +617,50 @@ describe('LockService', () => {
       service.on(LockEvent.RELEASED, handler);
       await service.withLock('pay', async () => 'x').catch(() => null);
       expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('once() fires the typed listener exactly once', async () => {
+      const handler = jest.fn();
+      service.once(LockEvent.ACQUIRED, handler);
+      await service.withLock('pay', async () => null, 1000);
+      await service.withLock('pay', async () => null, 1000);
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits EXTEND_FAILED when auto-extend fails mid-callback', async () => {
+      jest.useFakeTimers();
+      mockExtend.mockRejectedValue(new Error('lock expired'));
+      const handler = jest.fn();
+      service.on(LockEvent.EXTEND_FAILED, handler);
+
+      let resolveCallback!: (v: string) => void;
+      const callbackPromise = service.withLock(
+        'expiry-job',
+        () =>
+          new Promise<string>((resolve) => {
+            resolveCallback = resolve;
+          }),
+        200,
+        true,
+      );
+
+      await flushMicrotasks();
+      jest.advanceTimersByTime(101);
+      await flushMicrotasks();
+
+      expect(handler).toHaveBeenCalledWith('expiry-job', expect.stringContaining('lock expired'));
+
+      resolveCallback('done');
+      await callbackPromise;
+      jest.useRealTimers();
+    });
+
+    it('emits RELEASE_FAILED when release fails after the callback completes', async () => {
+      mockRelease.mockRejectedValueOnce(new Error('release failed'));
+      const handler = jest.fn();
+      service.on(LockEvent.RELEASE_FAILED, handler);
+      await service.withLock('res', async () => 'value');
+      expect(handler).toHaveBeenCalledWith('res', expect.stringContaining('release failed'));
     });
   });
 
@@ -669,6 +832,16 @@ describe('LockService', () => {
       expect(released).toHaveBeenCalledWith('res', expect.any(Number));
     });
 
+    it('emits QUEUED with a 1-based queue position on entry', async () => {
+      mockZrank.mockResolvedValueOnce(2);
+      const handler = jest.fn();
+      service.on(LockEvent.QUEUED, handler);
+
+      await service.withLock('res', async () => null, { duration: 1000, queue: true });
+
+      expect(handler).toHaveBeenCalledWith('res', 3);
+    });
+
     it('re-joins the queue if its ticket was evicted while polling', async () => {
       mockZrange
         .mockResolvedValueOnce([])
@@ -683,6 +856,299 @@ describe('LockService', () => {
       await expect(service.withLock(['a', 'b'], async () => 'ok', { queue: true })).rejects.toThrow(
         'not supported for lock groups',
       );
+    });
+
+    it('admittedSet pages past a run of expired entries to find the live one', async () => {
+      // First page (10 entries, all already expired) gets fully evicted;
+      // admittedSet must continue to a second page instead of giving up.
+      const expiredPage = Array.from({ length: 10 }, (_, i) => `1|expired-${i}`);
+      mockZrange
+        .mockResolvedValueOnce(expiredPage)
+        .mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
+      const result = await service.withLock('res', async () => 'ok', {
+        duration: 1000,
+        queue: true,
+      });
+
+      expect(result).toBe('ok');
+      expect(mockZrange).toHaveBeenCalledTimes(2);
+      expect(mockZrem).toHaveBeenCalledTimes(10 + 1); // 10 expired entries + our own cleanup
+    });
+  });
+
+  describe('semaphore (maxConcurrent: N)', () => {
+    it('acquires a slot immediately when admitted and semaphoreAcquire succeeds', async () => {
+      const result = await service.withLock('pool', async () => 'ok', {
+        duration: 1000,
+        maxConcurrent: 3,
+      });
+
+      expect(result).toBe('ok');
+      expect(mockSemaphoreAcquire).toHaveBeenCalledWith(
+        'lock:pool:sem',
+        expect.any(Number),
+        expect.any(Number),
+        3,
+        expect.any(String),
+      );
+      expect(mockZrem).toHaveBeenCalledWith('lock:pool:sem:queue', expect.any(String));
+    });
+
+    it('retries without losing queue position when semaphoreAcquire reports the set still full', async () => {
+      mockSemaphoreAcquire.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+      const result = await service.withLock('pool', async () => 'ok', {
+        duration: 1000,
+        maxConcurrent: 2,
+      });
+
+      expect(result).toBe('ok');
+      expect(mockSemaphoreAcquire).toHaveBeenCalledTimes(2);
+    });
+
+    it('releases the slot via ZREM on the owners set, not a shared counter', async () => {
+      await service.withLock('pool', async () => 'ok', { duration: 1000, maxConcurrent: 2 });
+      expect(mockZrem).toHaveBeenCalledWith('lock:pool:sem', expect.any(String));
+    });
+
+    it('throws LockAcquisitionException when the semaphore wait exceeds queueTimeout', async () => {
+      mockZrange.mockResolvedValue(['someone-else-forever']);
+      await expect(
+        service.withLock('pool', async () => 'ok', {
+          duration: 1000,
+          maxConcurrent: 2,
+          queueTimeout: 60,
+        }),
+      ).rejects.toBeInstanceOf(LockAcquisitionException);
+    });
+
+    it('emits QUEUED, ACQUIRED, and RELEASED for a semaphore acquisition', async () => {
+      const queued = jest.fn();
+      const acquired = jest.fn();
+      const released = jest.fn();
+      service.on(LockEvent.QUEUED, queued);
+      service.on(LockEvent.ACQUIRED, acquired);
+      service.on(LockEvent.RELEASED, released);
+
+      await service.withLock('pool', async () => null, { duration: 1000, maxConcurrent: 4 });
+
+      expect(queued).toHaveBeenCalledWith('pool', expect.any(Number));
+      expect(acquired).toHaveBeenCalledWith('pool', 1000);
+      expect(released).toHaveBeenCalledWith('pool', expect.any(Number));
+    });
+
+    it('auto-extends via semaphoreExtend and aborts the signal if the slot was evicted', async () => {
+      jest.useFakeTimers();
+      mockSemaphoreExtend.mockResolvedValue(0); // "evicted" — not renewed
+
+      let signal!: AbortSignal;
+      let resolveCallback!: (v: string) => void;
+      const callbackPromise = service.withLock(
+        'pool',
+        (s) =>
+          new Promise<string>((resolve) => {
+            signal = s;
+            resolveCallback = resolve;
+          }),
+        { duration: 200, maxConcurrent: 2, autoExtend: true },
+      );
+
+      await flushMicrotasks();
+      jest.advanceTimersByTime(101);
+      await flushMicrotasks();
+
+      expect(mockSemaphoreExtend).toHaveBeenCalledWith(
+        'lock:pool:sem',
+        expect.any(String),
+        expect.any(Number),
+      );
+      expect(signal.aborted).toBe(true);
+
+      resolveCallback('done');
+      await callbackPromise;
+      jest.useRealTimers();
+    });
+
+    it('rejects maxConcurrent for lock groups (array resources)', async () => {
+      await expect(
+        service.withLock(['a', 'b'], async () => 'ok', { maxConcurrent: 2 }),
+      ).rejects.toThrow('not supported for lock groups');
+    });
+
+    it('rejects maxConcurrent combined with queue', async () => {
+      await expect(
+        service.withLock('res', async () => 'ok', { maxConcurrent: 2, queue: true }),
+      ).rejects.toThrow('cannot be combined');
+    });
+
+    it.each([0, -1, 1.5])('rejects a non-positive-integer maxConcurrent (%p)', async (value) => {
+      await expect(
+        service.withLock('res', async () => 'ok', { maxConcurrent: value }),
+      ).rejects.toThrow('positive integer');
+    });
+  });
+
+  describe('read-write locks (mode: "read" | "write")', () => {
+    describe('mode: "read"', () => {
+      it('acquires immediately when rwAcquireRead admits it', async () => {
+        const result = await service.withLock('doc', async () => 'ok', {
+          duration: 1000,
+          mode: 'read',
+        });
+
+        expect(result).toBe('ok');
+        expect(mockRwAcquireRead).toHaveBeenCalledWith(
+          'lock:doc:rw:readers',
+          'lock:doc:rw:writer',
+          'lock:doc:rw:writer-waiting',
+          expect.any(Number),
+          expect.any(Number),
+          expect.any(String),
+        );
+      });
+
+      it('retries while a writer holds or is waiting', async () => {
+        mockRwAcquireRead.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+        const result = await service.withLock('doc', async () => 'ok', {
+          duration: 1000,
+          mode: 'read',
+        });
+
+        expect(result).toBe('ok');
+        expect(mockRwAcquireRead).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases via ZREM on the readers set', async () => {
+        await service.withLock('doc', async () => 'ok', { duration: 1000, mode: 'read' });
+        expect(mockZrem).toHaveBeenCalledWith('lock:doc:rw:readers', expect.any(String));
+      });
+
+      it('throws LockAcquisitionException when the wait exceeds queueTimeout', async () => {
+        mockRwAcquireRead.mockResolvedValue(0);
+        await expect(
+          service.withLock('doc', async () => 'ok', {
+            duration: 1000,
+            mode: 'read',
+            queueTimeout: 60,
+          }),
+        ).rejects.toBeInstanceOf(LockAcquisitionException);
+      });
+
+      it('multiple concurrent readers can all be admitted (no shared exclusion)', async () => {
+        const results = await Promise.all(
+          Array.from({ length: 5 }, (_, i) =>
+            service.withLock(`doc-${i}`, async () => i, { duration: 1000, mode: 'read' }),
+          ),
+        );
+        expect(results).toEqual([0, 1, 2, 3, 4]);
+      });
+    });
+
+    describe('mode: "write"', () => {
+      it('sets the writer-waiting marker while contending, then acquires', async () => {
+        const result = await service.withLock('doc', async () => 'ok', {
+          duration: 1000,
+          mode: 'write',
+        });
+
+        expect(result).toBe('ok');
+        expect(mockSet).toHaveBeenCalledWith(
+          'lock:doc:rw:writer-waiting',
+          expect.any(String),
+          'PX',
+          expect.any(Number),
+        );
+        expect(mockRwAcquireWrite).toHaveBeenCalledWith(
+          'lock:doc:rw:readers',
+          'lock:doc:rw:writer',
+          expect.any(Number),
+          1000,
+          expect.any(String),
+        );
+      });
+
+      it('retries while readers are still draining', async () => {
+        mockRwAcquireWrite.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+        const result = await service.withLock('doc', async () => 'ok', {
+          duration: 1000,
+          mode: 'write',
+        });
+
+        expect(result).toBe('ok');
+        expect(mockRwAcquireWrite).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases via a compare-and-delete on the writer key, and clears writer-waiting', async () => {
+        await service.withLock('doc', async () => 'ok', { duration: 1000, mode: 'write' });
+        expect(mockRwReleaseWrite).toHaveBeenCalledWith('lock:doc:rw:writer', expect.any(String));
+        expect(mockDel).toHaveBeenCalledWith('lock:doc:rw:writer-waiting');
+      });
+
+      it('throws LockAcquisitionException when the wait exceeds queueTimeout', async () => {
+        mockRwAcquireWrite.mockResolvedValue(0);
+        await expect(
+          service.withLock('doc', async () => 'ok', {
+            duration: 1000,
+            mode: 'write',
+            queueTimeout: 60,
+          }),
+        ).rejects.toBeInstanceOf(LockAcquisitionException);
+      });
+
+      it('auto-extends via rwExtendWrite and aborts the signal if evicted', async () => {
+        jest.useFakeTimers();
+        mockRwExtendWrite.mockResolvedValue(0); // "evicted" — not renewed
+
+        let signal!: AbortSignal;
+        let resolveCallback!: (v: string) => void;
+        const callbackPromise = service.withLock(
+          'doc',
+          (s) =>
+            new Promise<string>((resolve) => {
+              signal = s;
+              resolveCallback = resolve;
+            }),
+          { duration: 200, mode: 'write', autoExtend: true },
+        );
+
+        await flushMicrotasks();
+        jest.advanceTimersByTime(101);
+        await flushMicrotasks();
+
+        expect(mockRwExtendWrite).toHaveBeenCalledWith(
+          'lock:doc:rw:writer',
+          expect.any(String),
+          200,
+        );
+        expect(signal.aborted).toBe(true);
+
+        resolveCallback('done');
+        await callbackPromise;
+        jest.useRealTimers();
+      });
+    });
+
+    describe('validation', () => {
+      it('rejects mode for lock groups (array resources)', async () => {
+        await expect(
+          service.withLock(['a', 'b'], async () => 'ok', { mode: 'read' }),
+        ).rejects.toThrow('not supported for lock groups');
+      });
+
+      it('rejects mode combined with queue', async () => {
+        await expect(
+          service.withLock('res', async () => 'ok', { mode: 'read', queue: true }),
+        ).rejects.toThrow('cannot be combined');
+      });
+
+      it('rejects mode combined with maxConcurrent', async () => {
+        await expect(
+          service.withLock('res', async () => 'ok', { mode: 'write', maxConcurrent: 2 }),
+        ).rejects.toThrow('cannot be combined');
+      });
     });
   });
 
@@ -701,5 +1167,91 @@ describe('LockService', () => {
       await service.withLock('res', async () => null);
       expect(mockAcquire).toHaveBeenCalledWith(['lock:res'], 5000);
     });
+  });
+});
+
+describe('LockService — Lua command registration (semaphore + read-write lock)', () => {
+  it('defines the semaphore and read-write lock commands on a client that supports defineCommand', async () => {
+    const defineCommand = jest.fn();
+    const client = { defineCommand, zadd: jest.fn(), zrem: jest.fn(), zrange: jest.fn() };
+
+    await Test.createTestingModule({
+      providers: [
+        LockService,
+        {
+          provide: LOCK_MODULE_OPTIONS,
+          useValue: { clients: [client], keyPrefix: 'lock' },
+        },
+      ],
+    }).compile();
+
+    expect(defineCommand).toHaveBeenCalledWith(
+      'semaphoreAcquire',
+      expect.objectContaining({ numberOfKeys: 1 }),
+    );
+    expect(defineCommand).toHaveBeenCalledWith(
+      'semaphoreExtend',
+      expect.objectContaining({ numberOfKeys: 1 }),
+    );
+    expect(defineCommand).toHaveBeenCalledWith(
+      'rwAcquireRead',
+      expect.objectContaining({ numberOfKeys: 3 }),
+    );
+    expect(defineCommand).toHaveBeenCalledWith(
+      'rwAcquireWrite',
+      expect.objectContaining({ numberOfKeys: 2 }),
+    );
+    expect(defineCommand).toHaveBeenCalledWith(
+      'rwExtendWrite',
+      expect.objectContaining({ numberOfKeys: 1 }),
+    );
+    expect(defineCommand).toHaveBeenCalledWith(
+      'rwReleaseWrite',
+      expect.objectContaining({ numberOfKeys: 1 }),
+    );
+  });
+
+  it('does not redefine commands the client already has', async () => {
+    const defineCommand = jest.fn();
+    const client = {
+      defineCommand,
+      semaphoreAcquire: jest.fn(),
+      semaphoreExtend: jest.fn(),
+      rwAcquireRead: jest.fn(),
+      rwAcquireWrite: jest.fn(),
+      rwExtendWrite: jest.fn(),
+      rwReleaseWrite: jest.fn(),
+      zadd: jest.fn(),
+      zrem: jest.fn(),
+      zrange: jest.fn(),
+    };
+
+    await Test.createTestingModule({
+      providers: [
+        LockService,
+        {
+          provide: LOCK_MODULE_OPTIONS,
+          useValue: { clients: [client], keyPrefix: 'lock' },
+        },
+      ],
+    }).compile();
+
+    expect(defineCommand).not.toHaveBeenCalled();
+  });
+
+  it('skips registration entirely on a client without defineCommand (e.g. a plain test mock)', async () => {
+    const client = { zadd: jest.fn(), zrem: jest.fn(), zrange: jest.fn() };
+
+    await expect(
+      Test.createTestingModule({
+        providers: [
+          LockService,
+          {
+            provide: LOCK_MODULE_OPTIONS,
+            useValue: { clients: [client], keyPrefix: 'lock' },
+          },
+        ],
+      }).compile(),
+    ).resolves.toBeDefined();
   });
 });
