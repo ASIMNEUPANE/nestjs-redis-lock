@@ -301,6 +301,34 @@ this does not by itself protect a long callback running under a lock that
 simply expired. Pair it with a fencing token wherever the write itself needs
 protecting, not just prompt cancellation.
 
+### Fencing tokens and AbortSignal via `@Lock()`
+
+`withLock()`'s callback receives `(signal, fencingToken)` directly, but a
+`@Lock()`-decorated method's own signature is its real business parameters,
+spread — there's no room to also append a signal and a token. Call
+`getLockContext()` from inside a decorated method instead:
+
+```typescript
+import { Lock, getLockContext } from 'nestjs-redlock';
+
+class OrderService {
+  @Lock({ key: (id: string) => `order:${id}`, autoExtend: true })
+  async processOrder(id: string): Promise<void> {
+    const { signal, fencingToken } = getLockContext()!;
+    await this.repo.applyWithFencing(id, fencingToken, signal);
+  }
+}
+```
+
+It returns `undefined` outside of any `@Lock()`-decorated call, and — since
+it's scoped to the decorator specifically — calling `LockService.withLock()`
+directly does not populate it either; that callback already gets its own
+`(signal, fencingToken)` arguments. If a decorated method calls another
+decorated method, `getLockContext()` inside the inner call reflects the
+inner lock's own signal/token, reverting to the outer one once the inner
+call returns — capture it into a local variable first if the outer method
+needs its own values again after the nested call.
+
 ## Configuration
 
 ### Synchronous
@@ -310,10 +338,13 @@ LockModule.register({
   clients: [new Redis()],        // required: one or more ioredis instances
   duration: 5000,                // default lock TTL (ms)
   retryCount: 3,                 // acquisition retries
-  retryDelay: 200,               // delay between retries (ms)
-  retryJitter: 100,              // random jitter added to delay (ms)
+  retryDelay: 200,                 // delay between retries (ms)
+  retryJitter: 100,                // random jitter added to delay (ms) — also randomizes queue/semaphore/RW poll intervals
   driftFactor: 0.01,             // clock drift compensation
   keyPrefix: 'lock',             // prefix for all lock keys
+  exposeToDecorator: true,       // false if this instance shouldn't compete for @Lock() — see Operational notes
+  fenceCounterIdleTtl: undefined, // ms of inactivity before a fencing-token counter may expire — see Fencing tokens
+  maxListeners: 10,              // EventEmitter.setMaxListeners() — raise only if you intentionally attach >10 listeners per event
 })
 ```
 
@@ -422,8 +453,19 @@ import { LockService } from 'nestjs-redlock';
 import { attachOtelTracing } from 'nestjs-redlock/tracing';
 
 const lockService = app.get(LockService);
-attachOtelTracing(lockService);
+const detach = attachOtelTracing(lockService);
+// later, e.g. in onModuleDestroy(): detach();
 ```
+
+`attachOtelTracing` returns a disposer that removes all the listeners it
+attached — call it once no locks are actively being tracked (detaching
+mid-flight leaves any in-flight spans open rather than fabricating a status
+for an acquisition that may still be underway). Without ever calling it,
+repeated `attachOtelTracing()` calls on the same `LockService` (hot reload,
+repeated test-module construction) accumulate listeners with no automatic
+cleanup — Node's own `MaxListenersExceededWarning` is the intended signal
+something forgot to detach; see `maxListeners` in [Configuration](#configuration)
+to raise the threshold deliberately instead of suppressing the warning.
 
 **Correlation limitation:** events carry a resource label, not a per-call acquisition id, so
 concurrent holders of the *same* label (a semaphore, a read-write lock's readers, or a lock
@@ -476,6 +518,26 @@ so far (method, resource, options, timestamp) — useful for asserting *which*
 resource your code locked without depending on Redis state. `clearCalls()`
 resets the log.
 
+`queue: true`, `maxConcurrent`, and `mode: 'read' | 'write'` are also
+simulated — in-process admission bookkeeping, not a timing-faithful
+reimplementation — so a test can assert an admission bound, read/write
+exclusion, or FIFO-ish hand-off without Redis:
+
+```typescript
+// Only 2 callers admitted at once; a 3rd blocks until one releases.
+await Promise.all([
+  fake.withLock('pool', () => doWork(), { maxConcurrent: 2 }),
+  fake.withLock('pool', () => doWork(), { maxConcurrent: 2 }),
+]);
+```
+
+`simulateLockLoss(resource)` aborts the signal of every in-flight `withLock`
+callback for that resource — regardless of `autoExtend` — for testing an
+AbortSignal-aware callback without waiting on real auto-extend failure.
+`resetQueueState(resource?)` discards simulated admission bookkeeping left
+behind by an abandoned holder (e.g. a leaked promise from an earlier test),
+so a later acquisition for that resource isn't blocked by it.
+
 ## Error Handling
 
 | Exception | HTTP Status | When |
@@ -520,6 +582,22 @@ than several clients at the same one.
 **Key prefixes.** All keys are namespaced `{keyPrefix}:{resource}` (default
 `lock`). Give each application its own `keyPrefix` when several share a Redis,
 or unrelated services will contend on identical resource names.
+
+**`@Lock()` resolves exactly one `LockService` per process.** It has no DI —
+it resolves whichever `LockService` was constructed most recently. If your
+process legitimately constructs more than one (e.g. two `LockModule.register()`
+calls with different configs), the earlier one's decorated methods silently
+start acquiring locks under the later one's config. A mismatched second
+registration logs a warning naming this; pass `exposeToDecorator: false` on
+the instance that shouldn't compete for `@Lock()`, and inject its
+`LockService` directly instead.
+
+**Fencing-token counters can grow without bound.** `{keyPrefix}:{resource}:fence`
+is a plain, never-expiring `INCR` counter — one permanent key per distinct
+label for a high-cardinality dynamic key (e.g. `booking:${bookingId}`). Set
+`fenceCounterIdleTtl` to let a counter expire after genuine, continuous
+idleness (the TTL is refreshed on every acquisition, so it never resets while
+the label is in active or recurring use) if unbounded key growth is a concern.
 
 **`redlock@5` is still a beta release.** It is the most complete Redlock
 implementation for Node and is in wide production use, but the version pinned

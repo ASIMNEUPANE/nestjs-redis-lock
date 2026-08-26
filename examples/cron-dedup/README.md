@@ -67,9 +67,10 @@ If your job takes up to 8 seconds and fires every 10 seconds, set `duration: 12_
 
 ## What this example doesn't show
 
-`@Lock()` doesn't expose the programmatic API's `AbortSignal`/fencing-token callback
-arguments or `maxConcurrent`/`mode` options — a decorated method only ever gets `onFail` and
-a static or dynamic `key`. If a scheduled job needs those (e.g. to guard a write against a
-paused holder resuming after a newer run already committed), call `LockService.withLock()`
-directly inside the method body instead of relying on the decorator. See the
-`basic-usage` example's `increment-fenced` endpoint for that pattern.
+`@Lock()` already accepts `queue`/`maxConcurrent`/`mode` alongside `key`/`duration`/`onFail`,
+and a decorated method can read its own `AbortSignal`/fencing token via `getLockContext()`
+(from `nestjs-redlock`) — it just isn't needed for a simple dedup job like this one. See the
+`basic-usage` example's `increment-fenced` endpoint for the same pattern (guarding a write
+against a paused holder resuming after a newer run already committed) via the programmatic
+`LockService.withLock()` API; `getLockContext()` gives a `@Lock()`-decorated method the same
+`(signal, fencingToken)` pair without changing its own method signature.

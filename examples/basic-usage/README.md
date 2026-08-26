@@ -38,5 +38,6 @@ curl -X POST http://localhost:3000/counter/increment-fenced
 - `@Lock()` on a controller method for declarative locking
 - `withLock()`'s `(signal, fencingToken)` callback — `CounterService.incrementWithFencing()`
   uses `autoExtend: true` and checks `signal.aborted` before writing, and rejects the write
-  if `fencingToken` isn't newer than the last one it applied. `@Lock()` doesn't expose either
-  argument to a decorated method, so this needs the programmatic API.
+  if `fencingToken` isn't newer than the last one it applied. A `@Lock()`-decorated method
+  gets the same pair via `getLockContext()` instead, without changing its own signature —
+  this example uses the programmatic API directly since it needs the values inline.

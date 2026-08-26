@@ -151,4 +151,58 @@ describe('attachOtelTracing', () => {
 
     expect(finished()[0].instrumentationScope.name).toBe('my-app');
   });
+
+  describe('detach (returned disposer)', () => {
+    const ALL_EVENTS = [
+      LockEvent.QUEUED,
+      LockEvent.ACQUIRED,
+      LockEvent.EXTENDED,
+      LockEvent.EXTEND_FAILED,
+      LockEvent.RELEASED,
+      LockEvent.RELEASE_FAILED,
+      LockEvent.FAILED,
+    ];
+
+    it('subscribes exactly one listener per event', () => {
+      const lockService = fakeLockService();
+      attachOtelTracing(lockService);
+
+      for (const event of ALL_EVENTS) {
+        expect(lockService.listenerCount(event)).toBe(1);
+      }
+    });
+
+    it('removes all its listeners when the returned disposer is called', () => {
+      const lockService = fakeLockService();
+      const detach = attachOtelTracing(lockService);
+
+      detach();
+
+      for (const event of ALL_EVENTS) {
+        expect(lockService.listenerCount(event)).toBe(0);
+      }
+    });
+
+    it('stops recording spans for events emitted after detach', () => {
+      const lockService = fakeLockService();
+      const detach = attachOtelTracing(lockService);
+      detach();
+
+      lockService.emit(LockEvent.ACQUIRED, 'x', 1000);
+      lockService.emit(LockEvent.RELEASED, 'x', 1);
+
+      expect(finished()).toHaveLength(0);
+    });
+
+    it('leaves an in-flight span open rather than closing it on detach', () => {
+      const lockService = fakeLockService();
+      const detach = attachOtelTracing(lockService);
+
+      lockService.emit(LockEvent.ACQUIRED, 'still-open', 1000);
+      detach();
+
+      // Nothing ever closed the span — the exporter sees no finished spans.
+      expect(finished()).toHaveLength(0);
+    });
+  });
 });

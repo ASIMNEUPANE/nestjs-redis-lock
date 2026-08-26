@@ -1,6 +1,6 @@
 import { trace, Span, SpanStatusCode } from '@opentelemetry/api';
 import { LockService } from './lock.service';
-import { LockEvent } from './lock.events';
+import { LockEvent, LockEventPayloads } from './lock.events';
 
 /** Options for {@link attachOtelTracing}. */
 export interface OtelLockTracingOptions {
@@ -38,19 +38,41 @@ interface TrackedSpan {
  * time this is exact; under concurrent sharing it is a documented
  * best-effort approximation, not a per-call guarantee.
  *
+ * Returns a disposer that removes all listeners this attached. Call it once
+ * no locks are actively being tracked (e.g. during shutdown) — detaching
+ * mid-flight leaves any in-flight spans permanently open rather than
+ * fabricating a status for an acquisition that may still be legitimately
+ * underway. Without ever calling the disposer, repeated `attachOtelTracing()`
+ * calls on the same LockService (hot reload, repeated test-module
+ * construction) accumulate listeners with no automatic cleanup — Node's own
+ * `MaxListenersExceededWarning` is the intended signal something forgot to
+ * detach; see `LockModuleOptions.maxListeners` to raise the threshold
+ * deliberately instead of suppressing the warning.
+ *
  * @example
  * import { LockModule, LockService } from 'nestjs-redlock';
  * import { attachOtelTracing } from 'nestjs-redlock/tracing';
  *
  * const lockService = app.get(LockService);
- * attachOtelTracing(lockService);
+ * const detach = attachOtelTracing(lockService);
+ * // later, e.g. in onModuleDestroy(): detach();
  */
 export function attachOtelTracing(
   lockService: LockService,
   options: OtelLockTracingOptions = {},
-): void {
+): () => void {
   const tracer = trace.getTracer(options.tracerName ?? 'nestjs-redlock');
   const open = new Map<string, TrackedSpan[]>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const subscriptions: Array<[keyof LockEventPayloads, (...args: any[]) => void]> = [];
+  const subscribe = <E extends keyof LockEventPayloads>(
+    event: E,
+    listener: (...args: LockEventPayloads[E]) => void,
+  ): void => {
+    lockService.on(event, listener);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    subscriptions.push([event, listener as (...args: any[]) => void]);
+  };
 
   const push = (resource: string, entry: TrackedSpan): void => {
     const entries = open.get(resource);
@@ -98,14 +120,14 @@ export function attachOtelTracing(
     return [...(entries ?? [])].reverse().find((entry) => entry.acquired)?.span;
   };
 
-  lockService.on(LockEvent.QUEUED, (resource, queuePosition) => {
+  subscribe(LockEvent.QUEUED, (resource, queuePosition) => {
     const span = tracer.startSpan(`lock.wait ${resource}`);
     span.setAttribute('lock.resource', resource);
     span.addEvent('lock.queued', { 'lock.queue_position': queuePosition });
     push(resource, { span, acquired: false });
   });
 
-  lockService.on(LockEvent.ACQUIRED, (resource, durationMs) => {
+  subscribe(LockEvent.ACQUIRED, (resource, durationMs) => {
     const queued = takeQueued(resource);
     const span = queued?.span ?? tracer.startSpan(`lock.acquire ${resource}`);
     span.setAttribute('lock.resource', resource);
@@ -118,19 +140,19 @@ export function attachOtelTracing(
     }
   });
 
-  lockService.on(LockEvent.EXTENDED, (resource, newDurationMs) => {
+  subscribe(LockEvent.EXTENDED, (resource, newDurationMs) => {
     findAcquired(resource)?.addEvent('lock.extended', {
       'lock.new_duration_ms': newDurationMs,
     });
   });
 
-  lockService.on(LockEvent.EXTEND_FAILED, (resource, reason) => {
+  subscribe(LockEvent.EXTEND_FAILED, (resource, reason) => {
     const span = findAcquired(resource);
     span?.addEvent('lock.extend_failed', { 'lock.reason': reason });
     span?.setStatus({ code: SpanStatusCode.ERROR, message: reason });
   });
 
-  lockService.on(LockEvent.RELEASED, (resource, heldForMs) => {
+  subscribe(LockEvent.RELEASED, (resource, heldForMs) => {
     const span = pop(resource, (entry) => entry.acquired)?.span;
     if (!span) {
       return;
@@ -140,7 +162,7 @@ export function attachOtelTracing(
     span.end();
   });
 
-  lockService.on(LockEvent.RELEASE_FAILED, (resource, reason) => {
+  subscribe(LockEvent.RELEASE_FAILED, (resource, reason) => {
     const span = pop(resource, (entry) => entry.acquired)?.span;
     if (!span) {
       return;
@@ -150,7 +172,7 @@ export function attachOtelTracing(
     span.end();
   });
 
-  lockService.on(LockEvent.FAILED, (resource, reason) => {
+  subscribe(LockEvent.FAILED, (resource, reason) => {
     // Fires either for a caller that never got past QUEUED (its span is
     // still unacquired) or one that failed immediately (no span yet) — cover
     // both, but never steal a span whose ACQUIRED already fired for a
@@ -163,4 +185,10 @@ export function attachOtelTracing(
     span.setStatus({ code: SpanStatusCode.ERROR, message: reason });
     span.end();
   });
+
+  return function detachOtelTracing(): void {
+    for (const [event, listener] of subscriptions) {
+      lockService.off(event, listener);
+    }
+  };
 }

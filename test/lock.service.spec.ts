@@ -22,9 +22,9 @@ jest.mock('redlock', () => {
     quit: mockQuit,
   }));
   class MockExecutionError extends Error {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(
       message: string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       public attempts: any[],
     ) {
       super(message);
@@ -86,6 +86,7 @@ describe('LockService', () => {
   const mockRwReleaseWrite = jest.fn().mockResolvedValue(1);
   const mockSet = jest.fn().mockResolvedValue('OK');
   const mockDel = jest.fn().mockResolvedValue(1);
+  const mockPexpire = jest.fn().mockResolvedValue(1);
 
   const mockOptions = {
     clients: [
@@ -104,6 +105,7 @@ describe('LockService', () => {
         rwReleaseWrite: mockRwReleaseWrite,
         set: mockSet,
         del: mockDel,
+        pexpire: mockPexpire,
       },
     ],
     duration: 5000,
@@ -135,6 +137,7 @@ describe('LockService', () => {
     mockRwReleaseWrite.mockResolvedValue(1);
     mockSet.mockResolvedValue('OK');
     mockDel.mockResolvedValue(1);
+    mockPexpire.mockResolvedValue(1);
     beHeadOfQueue();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -296,6 +299,28 @@ describe('LockService', () => {
       expect(result).toBeNull();
       expect(mockIncr).not.toHaveBeenCalled();
     });
+
+    it('never refreshes the fence counter TTL by default (pre-1.3.0 behavior)', async () => {
+      await service.withLock('sku-42', async (_signal, token) => token);
+      expect(mockPexpire).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the fence counter TTL on every acquisition when fenceCounterIdleTtl is set', async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LockService,
+          {
+            provide: LOCK_MODULE_OPTIONS,
+            useValue: { ...mockOptions, fenceCounterIdleTtl: 30_000 },
+          },
+        ],
+      }).compile();
+      const idleTtlService = module.get<LockService>(LockService);
+
+      await idleTtlService.withLock('sku-42', async (_signal, token) => token);
+
+      expect(mockPexpire).toHaveBeenCalledWith('lock:sku-42:fence', 30_000);
+    });
   });
 
   describe('AbortSignal', () => {
@@ -381,6 +406,25 @@ describe('LockService', () => {
 
       await owned.onModuleDestroy();
       expect(mockQuit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('maxListeners', () => {
+    it('defaults to 10 (Node’s own default) when unset', () => {
+      expect(service.getMaxListeners()).toBe(10);
+    });
+
+    it('applies the configured value when set', async () => {
+      const withCustomMax = (
+        await Test.createTestingModule({
+          providers: [
+            LockService,
+            { provide: LOCK_MODULE_OPTIONS, useValue: { ...mockOptions, maxListeners: 20 } },
+          ],
+        }).compile()
+      ).get(LockService);
+
+      expect(withCustomMax.getMaxListeners()).toBe(20);
     });
   });
 
@@ -874,6 +918,78 @@ describe('LockService', () => {
       expect(result).toBe('ok');
       expect(mockZrange).toHaveBeenCalledTimes(2);
       expect(mockZrem).toHaveBeenCalledTimes(10 + 1); // 10 expired entries + our own cleanup
+    });
+  });
+
+  describe('poll delay jitter (queue/semaphore/read-write busy-poll loops)', () => {
+    // Intercepts the real setTimeout calls the poll loop makes, firing them
+    // immediately (ms: 0) so the test stays fast while still recording the
+    // jittered delay value the loop actually chose.
+    function spyOnPollDelays(): { delays: number[]; restore: () => void } {
+      const delays: number[] = [];
+      const realSetTimeout = global.setTimeout;
+      const spy = jest.spyOn(global, 'setTimeout').mockImplementation(((
+        cb: () => void,
+        ms?: number,
+      ) => {
+        if (ms !== undefined) {
+          delays.push(ms);
+        }
+        return realSetTimeout(cb, 0);
+      }) as unknown as typeof setTimeout);
+      return { delays, restore: () => spy.mockRestore() };
+    }
+
+    it('randomizes each poll delay within [retryDelay, retryDelay + retryJitter)', async () => {
+      mockZrange
+        .mockResolvedValueOnce(['someone-else'])
+        .mockResolvedValueOnce(['someone-else'])
+        .mockResolvedValueOnce(['someone-else'])
+        .mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
+      const { delays, restore } = spyOnPollDelays();
+      try {
+        await service.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+      } finally {
+        restore();
+      }
+
+      expect(delays.length).toBeGreaterThanOrEqual(3);
+      for (const delay of delays) {
+        expect(delay).toBeGreaterThanOrEqual(mockOptions.retryDelay);
+        expect(delay).toBeLessThan(mockOptions.retryDelay + mockOptions.retryJitter);
+      }
+      // With real randomness, 3+ identical draws in a row is effectively
+      // impossible — this is what tells jitter apart from a fixed delay.
+      expect(new Set(delays).size).toBeGreaterThan(1);
+    });
+
+    it('reproduces the old fixed-delay behavior exactly when retryJitter is 0', async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          LockService,
+          {
+            provide: LOCK_MODULE_OPTIONS,
+            useValue: { ...mockOptions, retryJitter: 0 },
+          },
+        ],
+      }).compile();
+      const noJitterService = module.get<LockService>(LockService);
+
+      mockZrange
+        .mockResolvedValueOnce(['someone-else'])
+        .mockResolvedValueOnce(['someone-else'])
+        .mockImplementation(async () => [mockZadd.mock.calls.at(-1)?.[3]]);
+
+      const { delays, restore } = spyOnPollDelays();
+      try {
+        await noJitterService.withLock('res', async () => 'ok', { duration: 1000, queue: true });
+      } finally {
+        restore();
+      }
+
+      expect(delays.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(delays)).toEqual(new Set([mockOptions.retryDelay]));
     });
   });
 

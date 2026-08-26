@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import Redis from 'ioredis';
-import { Injectable, Module } from '@nestjs/common';
+import { Injectable, Logger, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ScheduleModule, Cron } from '@nestjs/schedule';
 import { Lock } from '../../src/lock.decorator';
@@ -44,7 +44,7 @@ class ReportJobService {
   }
 }
 
-function buildInstance(instanceId: string, client: Redis) {
+function buildInstance(instanceId: string, client: Redis, keyPrefix = 'cron-itest') {
   @Module({
     imports: [
       ScheduleModule.forRoot(),
@@ -53,7 +53,7 @@ function buildInstance(instanceId: string, client: Redis) {
         // TTL comfortably longer than the job, so the winner keeps the lock.
         duration: 5000,
         retryCount: 0, // Lose the race → skip this tick, don't wait for the next
-        keyPrefix: 'cron-itest',
+        keyPrefix,
       }),
     ],
     providers: [{ provide: ReportJobService, useFactory: () => new ReportJobService(instanceId) }],
@@ -113,4 +113,25 @@ describe('@Lock() on @Cron handlers (integration — real Redis)', () => {
     // job holds ~1.2s against a 1s tick.
     expect(maxConcurrent).toBe(1);
   }, 30_000);
+
+  // Regression for the lock.holder.ts collision: @Lock() resolves exactly one
+  // LockService per process. This proves the *limitation* exists and is now
+  // surfaced with a warning — not that both configurations work correctly at
+  // once through @Lock() (they still can't; the earlier module's decorated
+  // methods silently start acquiring locks under the later module's prefix).
+  it('warns when a second LockModule with a different config is registered', async () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const appA = await buildInstance('instance-a', client, 'cron-itest-a');
+      await appA.init();
+      const appB = await buildInstance('instance-b', client, 'cron-itest-b');
+      await appB.init();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/exposeToDecorator: false/));
+
+      await Promise.all([appA.close(), appB.close()]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }, 20_000);
 });

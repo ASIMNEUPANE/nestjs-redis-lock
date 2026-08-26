@@ -3,6 +3,68 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-26
+
+Correctness hardening. A codebase audit found real gaps behind two of 1.2.0's
+headline features and three smaller rough edges; this release fixes all of
+them, each backed by a real test — no new primitives, no positioning work.
+
+### Fixed
+
+- **`@Lock()` could route to the wrong `LockService` silently.** The
+  decorator resolves exactly one `LockService` per process, and a second
+  instance with a different configuration (e.g. two `LockModule.register()`
+  calls) used to overwrite the active one with no warning — and destroying
+  either instance cleared whichever one was active, even a different,
+  still-live one. `setActiveLockService` now warns on a genuine
+  configuration mismatch and names the fix (`exposeToDecorator: false` on
+  the instance that shouldn't compete for `@Lock()`), and
+  `clearActiveLockService` only ever clears the instance being destroyed.
+
+- **`@Lock()` discarded the fencing token and `AbortSignal`.** The
+  decorator's wrapper called the callback with zero arguments, dropping
+  the two values `runWithLock` hands to every callback — the package's two
+  headline v1.2.0 differentiators were invisible to its primary,
+  decorator-first API. `getLockContext()` (new, exported from
+  `nestjs-redlock`) reads them from inside a `@Lock()`-decorated method via
+  `AsyncLocalStorage`, without changing that method's own signature.
+
+- **Fencing-token counters grew forever.** `{keyPrefix}:{resource}:fence`
+  was a bare `INCR`, never expiring — permanent Redis key growth for
+  high-cardinality dynamic labels (e.g. one key per booking ID, forever).
+  New `fenceCounterIdleTtl` module option refreshes the counter's TTL on
+  every acquisition, so it only expires after genuine, continuous idleness
+  for that label — never while in active or recurring use.
+
+- **Queue/semaphore/read-write busy-poll loops had no jitter.** All four
+  polling sites shared one fixed delay, so waiters that started polling
+  around the same moment stayed synchronized indefinitely — a standing
+  poll-stampede against Redis. They now reuse `retryJitter` (the same
+  option Redlock's own retries already used) to randomize each poll.
+
+- **`FakeLockService` always succeeded, regardless of `queue`,
+  `maxConcurrent`, `mode`, or `autoExtend`.** No test using the fake could
+  verify admission bounds, read/write exclusion, or `AbortSignal` firing.
+  It now simulates all of these in-process (not timing-faithful, but real
+  admission bookkeeping), plus `simulateLockLoss()` and `resetQueueState()`
+  test hooks. `FakeLockService` now also `implements Pick<LockService, ...>`,
+  so any future drift between the two classes' public signatures is a
+  compile error — this was mandated after 1.1.0's postmortem and never
+  actually built.
+
+- **`attachOtelTracing` had no way to detach.** Repeated attachment (hot
+  reload, repeated test-module construction) accumulated listeners with no
+  cleanup path. It now returns a disposer that removes everything it
+  attached; a new `maxListeners` module option lets you deliberately raise
+  `LockService`'s `EventEmitter` threshold instead of suppressing Node's own
+  leak warning.
+
+### Added
+
+- ESLint (flat config, `typescript-eslint` + `eslint-config-prettier`),
+  wired into `npm run lint`. The dozen `eslint-disable` comments already in
+  `src/` referenced a linter that was never actually installed.
+
 ## [1.2.0] — 2026-08-22
 
 New concurrency primitives, all built on the shared acquire/extend/release core

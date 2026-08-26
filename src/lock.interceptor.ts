@@ -1,7 +1,7 @@
 import { Injectable, NestInterceptor, ExecutionContext, CallHandler, Logger } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Observable, from, of } from 'rxjs';
-import { catchError, switchMap } from 'rxjs/operators';
+import { catchError } from 'rxjs/operators';
 import { LOCK_METADATA_KEY } from './constants';
 import { LockDecoratorOptions } from './interfaces/lock-options';
 import { LockService } from './lock.service';

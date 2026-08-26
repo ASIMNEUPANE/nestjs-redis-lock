@@ -574,6 +574,65 @@ describe('LockService (integration — real Redis)', () => {
 
       expect(second!.fencingToken).toBeGreaterThan(first!.fencingToken);
     });
+
+    describe('fenceCounterIdleTtl', () => {
+      let idleTtlModule: TestingModule;
+      let idleTtlService: LockService;
+
+      beforeEach(async () => {
+        idleTtlModule = await Test.createTestingModule({
+          providers: [
+            LockService,
+            {
+              provide: LOCK_MODULE_OPTIONS,
+              useValue: {
+                clients: [client],
+                duration: 5000,
+                retryCount: 200,
+                retryDelay: 50,
+                retryJitter: 25,
+                keyPrefix: 'itest',
+                fenceCounterIdleTtl: 300,
+              },
+            },
+          ],
+        }).compile();
+        idleTtlService = idleTtlModule.get(LockService);
+      });
+
+      afterEach(async () => {
+        await idleTtlModule.close().catch(() => undefined);
+      });
+
+      it('sets a TTL on the fence counter and lets it expire after genuine idleness', async () => {
+        await idleTtlService.withLock('idle-fence', async (_signal, token) => token);
+
+        const ttl = await client.pttl('itest:idle-fence:fence');
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(300);
+
+        // Wait past the idle TTL with no further use of this label — the
+        // documented, opt-in trade-off: the counter is gone, not a bug.
+        await new Promise((r) => setTimeout(r, 400));
+        expect(await client.exists('itest:idle-fence:fence')).toBe(0);
+
+        const restarted = await idleTtlService.withLock(
+          'idle-fence',
+          async (_signal, token) => token,
+        );
+        expect(restarted).toBe(1);
+      });
+
+      it('refreshes the TTL on every acquisition, so recurring use never expires it', async () => {
+        for (let i = 0; i < 4; i++) {
+          await idleTtlService.withLock('busy-fence', async (_signal, token) => token);
+          await new Promise((r) => setTimeout(r, 150));
+        }
+
+        // Never idle for the full 300ms window between uses — still alive.
+        expect(await client.exists('itest:busy-fence:fence')).toBe(1);
+      });
+    });
   });
 
   describe('AbortSignal on lock loss', () => {

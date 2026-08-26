@@ -3,6 +3,7 @@ import { LockDecoratorOptions } from './interfaces/lock-options';
 import { LOCK_METADATA_KEY } from './constants';
 import { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
 import { getActiveLockService } from './lock.holder';
+import { runInLockContext } from './lock.context';
 
 /**
  * Copies every Reflect metadata entry from the original method onto the
@@ -76,13 +77,18 @@ export function Lock(options: LockDecoratorOptions): MethodDecorator {
           : options.key;
 
       try {
-        return await lockService.withLock(resource, () => original.apply(this, args), {
-          duration: options.duration,
-          autoExtend: options.autoExtend,
-          queue: options.queue,
-          maxConcurrent: options.maxConcurrent,
-          mode: options.mode,
-        });
+        return await lockService.withLock(
+          resource,
+          (signal, fencingToken) =>
+            runInLockContext({ resource, signal, fencingToken }, () => original.apply(this, args)),
+          {
+            duration: options.duration,
+            autoExtend: options.autoExtend,
+            queue: options.queue,
+            maxConcurrent: options.maxConcurrent,
+            mode: options.mode,
+          },
+        );
       } catch (err) {
         if (options.onFail === 'skip' && err instanceof LockAcquisitionException) {
           return undefined;

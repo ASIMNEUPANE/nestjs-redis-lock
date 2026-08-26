@@ -9,7 +9,11 @@ import { FencingToken } from './interfaces/fencing-token';
 import { LockAcquisitionException } from './exceptions/lock-acquisition.exception';
 import { LockExtendException } from './exceptions/lock-extend.exception';
 import { LockEvent, LockEventPayloads } from './lock.events';
-import { setActiveLockService, clearActiveLockService } from './lock.holder';
+import {
+  setActiveLockService,
+  clearActiveLockService,
+  computeConfigFingerprint,
+} from './lock.holder';
 
 /** Error substrings that mean "Redis is unreachable", not "resource is held". */
 const CONNECTION_ERROR_PATTERNS = [
@@ -314,6 +318,8 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
   private readonly retryCount: number;
   private readonly retryDelay: number;
   private readonly retryJitter: number;
+  private readonly fenceCounterIdleTtl: number | undefined;
+  private readonly exposeToDecorator: boolean;
 
   constructor(
     @Inject(LOCK_MODULE_OPTIONS)
@@ -325,6 +331,9 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
     this.retryCount = options.retryCount ?? 3;
     this.retryDelay = options.retryDelay ?? 200;
     this.retryJitter = options.retryJitter ?? 100;
+    this.fenceCounterIdleTtl = options.fenceCounterIdleTtl;
+    this.exposeToDecorator = options.exposeToDecorator ?? true;
+    this.setMaxListeners(options.maxListeners ?? 10);
 
     this.redlock = new Redlock(options.clients, {
       driftFactor: options.driftFactor ?? 0.01,
@@ -334,7 +343,9 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
     });
 
     // Makes this instance reachable from the @Lock() decorator, which has no DI.
-    setActiveLockService(this);
+    if (this.exposeToDecorator) {
+      setActiveLockService(this, computeConfigFingerprint(options));
+    }
 
     this.registerSemaphoreCommands(options.clients[0]);
     this.registerReadWriteCommands(options.clients[0]);
@@ -642,7 +653,9 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
    * be shared with the rest of their application.
    */
   async onModuleDestroy(): Promise<void> {
-    clearActiveLockService();
+    if (this.exposeToDecorator) {
+      clearActiveLockService(this);
+    }
 
     if (!this.options.closeClientsOnDestroy) {
       return;
@@ -783,10 +796,33 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
    * `INCR` — atomic on its own, and issuance order already matches
    * acquisition order because this is only called after a caller has won
    * admission through the mutex/queue/semaphore/read-write gate.
+   *
+   * If `fenceCounterIdleTtl` is configured, the counter's TTL is refreshed
+   * (not set atomically with the INCR — a missed refresh only ever narrows
+   * the safe-idle window, it can't cause an unsafe reset while the label is
+   * still active) so it only expires after that many milliseconds of no
+   * acquisitions at all for this label.
    */
   private async nextFencingToken(label: string): Promise<FencingToken> {
     const client = this.options.clients[0];
-    return client.incr(`${this.buildKey(label)}:fence`);
+    const key = `${this.buildKey(label)}:fence`;
+    const next = await client.incr(key);
+    if (this.fenceCounterIdleTtl !== undefined) {
+      await client.pexpire(key, this.fenceCounterIdleTtl);
+    }
+    return next;
+  }
+
+  /**
+   * Randomized delay between busy-poll iterations for the queue/semaphore/
+   * read-write loops below, reusing `retryJitter` (the same option Redlock's
+   * own retries use) so waiters that started polling around the same moment
+   * desynchronize over time instead of hitting Redis in lockstep every
+   * `retryDelay` ms indefinitely.
+   */
+  private jitteredPollDelay(): number {
+    const jitter = this.retryJitter > 0 ? Math.floor(Math.random() * this.retryJitter) : 0;
+    return Math.max(10, this.retryDelay) + jitter;
   }
 
   /**
@@ -819,7 +855,6 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
     const queueTimeout = options.queueTimeout ?? ttl * 3;
     const deadline = Date.now() + queueTimeout;
     const member = `${deadline}|${randomUUID()}`;
-    const pollDelay = Math.max(10, this.retryDelay);
 
     const sequence = await client.incr(seqKey);
     await client.zadd(queueKey, 'NX', sequence, member);
@@ -854,7 +889,7 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
           await client.zadd(queueKey, 'NX', sequence, member);
         }
 
-        await new Promise((r) => setTimeout(r, pollDelay));
+        await new Promise((r) => setTimeout(r, this.jitteredPollDelay()));
       }
     } finally {
       try {
@@ -899,7 +934,6 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
     const queueTimeout = options.queueTimeout ?? ttl * 3;
     const deadline = Date.now() + queueTimeout;
     const member = `${deadline}|${randomUUID()}`;
-    const pollDelay = Math.max(10, this.retryDelay);
 
     const sequence = await client.incr(seqKey);
     await client.zadd(queueKey, 'NX', sequence, member);
@@ -948,7 +982,7 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
           await client.zadd(queueKey, 'NX', sequence, member);
         }
 
-        await new Promise((r) => setTimeout(r, pollDelay));
+        await new Promise((r) => setTimeout(r, this.jitteredPollDelay()));
       }
     } finally {
       try {
@@ -999,7 +1033,7 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
       LockModuleOptions['clients'][number];
     const queueTimeout = options.queueTimeout ?? ttl * 3;
     const deadline = Date.now() + queueTimeout;
-    const pollDelay = Math.max(10, this.retryDelay);
+    const basePollDelay = Math.max(10, this.retryDelay);
     const member = randomUUID();
 
     if (mode === 'read') {
@@ -1031,7 +1065,7 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
           );
         }
 
-        await new Promise((r) => setTimeout(r, pollDelay));
+        await new Promise((r) => setTimeout(r, this.jitteredPollDelay()));
       }
     }
 
@@ -1060,8 +1094,15 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
         if (admitted.has(queueMember)) {
           // We're the sole writer candidate. Refresh the starvation guard
           // on every poll so new readers keep being turned away while we
-          // wait for the existing ones to drain.
-          await client.set(writerWaitingKey, member, 'PX', Math.max(pollDelay * 3, 100));
+          // wait for the existing ones to drain. The margin accounts for
+          // jitter's worst-case gap between refreshes, not just the base
+          // poll delay, so the marker can't expire between polls.
+          await client.set(
+            writerWaitingKey,
+            member,
+            'PX',
+            Math.max((basePollDelay + this.retryJitter) * 3, 100),
+          );
 
           const now = Date.now();
           const acquired = await client.rwAcquireWrite(readersKey, writerKey, now, ttl, member);
@@ -1084,7 +1125,7 @@ export class LockService extends EventEmitter implements OnModuleDestroy {
           await client.zadd(queueKey, 'NX', sequence, queueMember);
         }
 
-        await new Promise((r) => setTimeout(r, pollDelay));
+        await new Promise((r) => setTimeout(r, this.jitteredPollDelay()));
       }
     } finally {
       try {

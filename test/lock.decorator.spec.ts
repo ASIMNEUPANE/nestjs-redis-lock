@@ -71,13 +71,15 @@ describe('Lock decorator — locking behavior', () => {
   const withLock = jest.fn(async (_resource: string | string[], callback: () => Promise<unknown>) =>
     callback(),
   );
+  let mockService: LockService;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    setActiveLockService({ withLock } as unknown as LockService);
+    mockService = { withLock } as unknown as LockService;
+    setActiveLockService(mockService, 'test-fingerprint');
   });
 
-  afterEach(() => clearActiveLockService());
+  afterEach(() => clearActiveLockService(mockService));
 
   // D2 regression: the interceptor passed ExecutionContext.getArgs(), which for
   // HTTP is [req, res, next] — so dynamic keys resolved to "seat:undefined".
@@ -196,7 +198,7 @@ describe('Lock decorator — locking behavior', () => {
   });
 
   it('explains what to do when LockModule was never registered', async () => {
-    clearActiveLockService();
+    clearActiveLockService(mockService);
 
     class Job {
       @Lock({ key: 'res' })

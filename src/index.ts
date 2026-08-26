@@ -18,4 +18,7 @@ export type { LockDecoratorOptions } from './interfaces/lock-options';
 export type { LockCallOptions } from './interfaces/lock-call-options';
 export type { FencingToken } from './interfaces/fencing-token';
 
+export { getLockContext } from './lock.context';
+export type { LockContext } from './lock.context';
+
 export { LOCK_MODULE_OPTIONS, LOCK_METADATA_KEY } from './constants';
